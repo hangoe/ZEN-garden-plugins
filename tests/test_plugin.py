@@ -7,7 +7,8 @@ def _load_plugin_with_fake_events(monkeypatch):
     """
     Import plugin module with a fake zen_garden events module.
 
-    Behaves like the Zen garden plugin loader and returns all modules, events and calls loaded.
+    Behaves like the Zen garden plugin loader and returns all modules, events and
+    calls loaded.
     """
     calls = []
 
@@ -57,4 +58,3 @@ def test_plugin_registers_handler_for_test_event1(monkeypatch):
     registered_event, registered_function = calls[0]
     assert registered_event is event.test_event1
     assert registered_function is module.this_will_be_called_first
-

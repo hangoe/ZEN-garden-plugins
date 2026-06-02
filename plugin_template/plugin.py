@@ -6,9 +6,14 @@ when the execution reaches the trigger to the respective event.
 The config dictionary will be filled by plugins.loader.register_plugins()
 """
 
-from zen_garden.plugin_system.events import Event, EventPublisher
+from typing import Any
 
-config = {}
+from zen_garden.plugin_system.events import (  # type: ignore[import-untyped]
+    Event,
+    EventPublisher,
+)
+
+config: dict[str, Any] = {}
 
 
 # Choose the event that will trigger the function call
