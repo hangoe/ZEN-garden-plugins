@@ -108,7 +108,7 @@ jobs:
         with:
             miniforge-variant: Miniforge3
             miniforge-version: latest
-            activate-environment: zen-creator-env
+            activate-environment: zen-galaxies-env
             use-mamba: true
 
       # date for the cache
