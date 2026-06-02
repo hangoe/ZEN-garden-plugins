@@ -1,0 +1,8 @@
+name: zen-galaxies-env
+channels:
+  - conda-forge
+dependencies:
+  - pip
+  - python=3.13
+  - pip:
+      - -e .[dev,vis,docs]
