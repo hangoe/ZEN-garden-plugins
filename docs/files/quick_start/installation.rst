@@ -1,0 +1,5 @@
+.. _installation.installation:
+
+############
+Installation
+############
