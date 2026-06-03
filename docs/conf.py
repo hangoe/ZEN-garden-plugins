@@ -168,7 +168,7 @@ html_favicon = "files/figures/general/zen_garden_logo_text.png"
 # Sphinx requires the changelog to be in the docs folder
 def copy_changelog(app):
     src = Path(app.confdir).parent / "CHANGELOG.md"
-    dst = Path(app.confdir) / "files" / "api" / "generated" / "changelog.md"
+    dst = Path(app.confdir) / "files" / "generated" / "changelog.md"
     if src.exists():
         shutil.copy(src, dst)
 

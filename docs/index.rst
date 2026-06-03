@@ -30,23 +30,21 @@ Documentation
    :maxdepth: 1
    :caption: Quick Start
 
-   files/quick_start/summary
    files/quick_start/installation
-
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Tutorials
-
-   files/tutorial/00_tutorial_overview
-
+   files/quick_start/implementation
 
 .. toctree::
    :maxdepth: 1
-   :caption: References
+   :caption: Available Plugins
+   :glob:
 
-   files/references/api_reference
-   files/api/generated/changelog.md
+   files/available_plugins/*/*
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Changelog
+
+   files/generated/changelog.md
 
 
 
