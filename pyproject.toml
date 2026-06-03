@@ -75,7 +75,7 @@ ignore = []
 convention = "google"
 
 [tool.ruff.lint.isort]
-known-first-party = ["your_package_name"]
+known-first-party = ["plugin_template"]
 
 [tool.mypy]
 #warn_unused_configs = true
