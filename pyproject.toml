@@ -3,12 +3,12 @@ requires = ["flit_core >=3.2,<4"]
 build-backend = "flit_core.buildapi"
 
 [tool.flit.module]
-name = "plugin_template"
+name = "zen_garden_plugins"
 
 [project]
-name = "zen_plugin_template"
+name = "zen_garden_plugins"
 version = "0.0.0"
-description="zen_plugin_template provides a template to create plugins for zen garden."
+description="zen_garden_plugins provides create plugins for zen garden."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -22,7 +22,7 @@ dependencies = [
 
 
 [project.entry-points."zen_garden.plugins"]
-plugin_template = "plugin_template.plugin"
+plugin_template = "zen_garden_plugins.plugin_template.plugin"
 
 
 [project.optional-dependencies]
@@ -75,7 +75,7 @@ ignore = []
 convention = "google"
 
 [tool.ruff.lint.isort]
-known-first-party = ["plugin_template"]
+known-first-party = ["zen_garden_plugins"]
 
 [tool.mypy]
 #warn_unused_configs = true
