@@ -34,4 +34,7 @@ def function_to_be_called_at_test_event1(*args, **kwargs):
     ``def function_to_be_called_at_after_model_construction(optimization_setup):``
 
     """
-    print(f"Hello. This is the plugin speaking. I am printing the config setting 'any_setting': {config['any_setting']}")
+    print(
+        f"Hello. This is the plugin speaking. I am printing the"
+        f" config setting 'any_setting': {config['any_setting']}"
+    )
