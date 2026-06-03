@@ -6,9 +6,9 @@
 
 .. _index.intro:
 
-##################################################
-ZEN-garden: Zero emissions Energy Networks Plugin
-##################################################
+################################################################
+ZEN-galaxies: Zero emissions Energy Networks Plugin Template
+################################################################
 
 
 .. _doc_overview:

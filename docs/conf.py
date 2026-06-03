@@ -32,6 +32,7 @@ author = (
     "Lukas Schmidt-Engelbertz, "
     "Nour Boulos, "
     "Christoph Funke, "
+    "Jan Wiegner, "
     "Giovanni Sansavini"
 )
 release = get_version("zen_plugin_template")
@@ -46,7 +47,6 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx.ext.mathjax",
-    "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.intersphinx",
     "sphinx.ext.todo",
@@ -57,7 +57,6 @@ extensions = [
     "myst_parser",
     "sphinx.ext.imgconverter",  # for SVG conversion
     "sphinxcontrib.mermaid",  # for class diagrams
-    "docstring",  # custom extension for inserting docstring text
 ]
 # allow errors in the notebooks
 nbsphinx_allow_errors = True
@@ -76,6 +75,9 @@ autodoc_default_options = {
     "members": True,
     "special-members": "__init__",
 }
+
+# mock import zen_garden
+autodoc_mock_imports = ["zen_garden"]
 
 numfig = True
 
@@ -138,7 +140,7 @@ html_theme_options = {
         "color-brand-primary": "#215CAF",
         "color-brand-content": "#007894",
     },
-    "source_repository": "https://github.com/ZEN-universe/ZEN-garden",
+    "source_repository": "https://github.com/ZEN-universe/ZEN-galaxies",
     "source_branch": "main",
     "source_directory": "docs/",
     "top_of_page_buttons": ["view"],
@@ -146,8 +148,8 @@ html_theme_options = {
 
 
 # The name for this set of Sphinx documents.
-html_title = "ZEN-garden"
-html_short_title = "ZEN-garden"
+html_title = "ZEN-galaxies"
+html_short_title = "ZEN-galaxies"
 
 # The name of an image file (relative to this directory)
 html_logo = "files/figures/general/zen_garden_logo_text.png"
