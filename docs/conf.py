@@ -35,7 +35,7 @@ author = (
     "Jan Wiegner, "
     "Giovanni Sansavini"
 )
-release = get_version("zen_plugin_template")
+release = get_version("zen_garden_plugins")
 language = "en"
 
 # -- General configuration ---------------------------------------------------
@@ -140,7 +140,7 @@ html_theme_options = {
         "color-brand-primary": "#215CAF",
         "color-brand-content": "#007894",
     },
-    "source_repository": "https://github.com/ZEN-universe/ZEN-galaxies",
+    "source_repository": "https://github.com/ZEN-universe/ZEN-garden-plugins",
     "source_branch": "main",
     "source_directory": "docs/",
     "top_of_page_buttons": ["view"],
@@ -148,8 +148,8 @@ html_theme_options = {
 
 
 # The name for this set of Sphinx documents.
-html_title = "ZEN-galaxies"
-html_short_title = "ZEN-galaxies"
+html_title = "ZEN-garden-plugins"
+html_short_title = "ZEN-garden-plugins"
 
 # The name of an image file (relative to this directory)
 html_logo = "files/figures/general/zen_garden_logo_text.png"
@@ -168,9 +168,10 @@ html_favicon = "files/figures/general/zen_garden_logo_text.png"
 # Sphinx requires the changelog to be in the docs folder
 def copy_changelog(app):
     src = Path(app.confdir).parent / "CHANGELOG.md"
-    dst = Path(app.confdir) / "files" / "generated" / "changelog.md"
+    dst_path = Path(app.confdir) / "files" / "generated"
+    dst_path.mkdir(parents=True, exist_ok=True)
     if src.exists():
-        shutil.copy(src, dst)
+        shutil.copy(src, dst_path / "changelog.md")
 
 
 def setup(app):

@@ -13,4 +13,4 @@ following paper:
   *SoftwareX, 29*, 102059. `DOI:10.1016/j.softx.2025.102059 <https://doi.org/10.1016/j.softx.2025.102059>`_
 
 In case you would like to collaborate with us on ZEN-garden, please reach out to
- us at zen-garden@ethz.ch.
+us at zen-garden@ethz.ch.

@@ -8,14 +8,16 @@ This page walks you through creating a plugin for ZEN-garden from scratch.
 
 There are two ways of working with plugins:
 
-- A plugin can live in this repository as a submodule. These plugins are approved by the ZEN-garden maintainers.
+- A plugin can live in this repository as a submodule. These plugins must 
+  be fully documented, have tests, and be deemed important enough for 
+  maintenance by the maintainers.
 
 - You can also create your own plugin in a separate repository and install it as a regular Python package.
   Therefore, you can fork this repository and adapt the plugin template.
 
 In both cases the module name is the name of the plugin that needs to be added to the ZEN-garden
 configuration file (``config.json``) to activate the plugin. If you are developing a plugin, you can
-install it in editable mode with ``pip install -e`` to see changes immediately without reinstalling.
+install this package in editable mode with ``pip install -e`` to see changes immediately without reinstalling.
 
 .. note::
 
@@ -27,8 +29,8 @@ install it in editable mode with ``pip install -e`` to see changes immediately w
 Step 1 — Create a repository
 -------------------------------
 
-Fork the Zen garden plugin template `repository on GitHub
-<https://github.com/ZEN-universe/ZEN-galaxies>`_. You can copy-paste the ``plugin_template/`` directory,
+Fork the ZEN-garden plugin template `repository on GitHub
+<https://github.com/ZEN-universe/ZEN-garden-plugins>`_. You can copy-paste the ``plugin_template/`` directory,
 rename it and start developing your own plugin.
 
 All plugin logic goes into ``plugin.py``. You can define helper modules if you like,

@@ -12,9 +12,9 @@ description="zen_garden_plugins provides create plugins for zen garden."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
+  { name="Jan Wiegner"},
   { name="Christoph Funke", email="zen-garden@ethz.ch" },
   { name="Jacob Mannhardt"},
-  { name="Jan Wiegner"},
 ]
 dependencies = [
     "zen_garden"
