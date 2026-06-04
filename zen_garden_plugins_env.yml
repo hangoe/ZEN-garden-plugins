@@ -1,0 +1,19 @@
+name: zen-garden-plugins-env
+channels:
+  - conda-forge
+dependencies:
+  - pip
+  - python=3.13
+  - pip:
+      - -e .[dev,docs]
+
+# To install
+# conda env create -f zen_garden_plugins_env.yml
+
+# To install zen-garden in editable mode (after initial environment creation)
+# cd path/to/zen-garden
+# conda activate zen-garden-plugins-env
+# pip install -e .[dev,docs]
+
+# To remove
+# conda remove -name zen-garden-plugins-env --all
