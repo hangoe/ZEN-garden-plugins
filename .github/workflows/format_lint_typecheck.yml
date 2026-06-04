@@ -11,7 +11,7 @@ on:
 jobs:
   lint-and-typecheck:
     runs-on: ubuntu-latest
-    if: ${{ github.repository == 'ZEN-universe/ZEN-galaxies' }}
+    if: ${{ github.repository == 'ZEN-universe/ZEN-garden-plugins' }}
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
