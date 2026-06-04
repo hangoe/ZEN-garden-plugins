@@ -41,7 +41,7 @@ jobs:
   # Bump version number
   bump_version:
     name: Bump Version
-    if: ${{ github.repository == 'ZEN-universe/ZEN-galaxies' && needs.check_nobump.outputs.nobump == 'false' }}
+    if: ${{ github.repository == 'ZEN-universe/ZEN-garden-plugins' && needs.check_nobump.outputs.nobump == 'false' }}
     runs-on: ubuntu-latest
     needs: [check_nobump]
     outputs:
@@ -173,7 +173,7 @@ jobs:
           
   create_tag:
     name: Create tag for release
-    if: ${{ github.repository == 'ZEN-universe/ZEN-galaxies' && github.ref == 'refs/heads/main' && needs.bump_version.outputs.semver_bump != 'none' }}
+    if: ${{ github.repository == 'ZEN-universe/ZEN-garden-plugins' && github.ref == 'refs/heads/main' && needs.bump_version.outputs.semver_bump != 'none' }}
     runs-on: ubuntu-latest
     needs: [bump_version]
     env:
@@ -198,7 +198,7 @@ jobs:
           git push origin --tags
 
   release:
-    if: ${{ github.repository == 'ZEN-universe/ZEN-galaxies' && github.ref == 'refs/heads/main'}}
+    if: ${{ github.repository == 'ZEN-universe/ZEN-garden-plugins' && github.ref == 'refs/heads/main'}}
     name: "Create Github Release"
     needs: [create_tag, bump_version]
     runs-on: ubuntu-latest
@@ -243,7 +243,7 @@ jobs:
           prerelease: false
 
   build-package:
-    if: ${{ github.repository == 'ZEN-universe/ZEN-galaxies' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.repository == 'ZEN-universe/ZEN-garden-plugins' && github.ref == 'refs/heads/main' }}
     name: "Build and verify package"
     runs-on: ubuntu-latest
     needs: release
@@ -255,13 +255,13 @@ jobs:
       - uses: hynek/build-and-inspect-python-package@v2
 
   release-test-pypi:
-    if: ${{ github.repository == 'ZEN-universe/ZEN-galaxies' && github.ref == 'refs/heads/main'}}
+    if: ${{ github.repository == 'ZEN-universe/ZEN-garden-plugins' && github.ref == 'refs/heads/main'}}
     name: "Release to Test PyPI"
     runs-on: ubuntu-latest
     needs: build-package
     environment:
       name: test-pypi
-      url: https://test.pypi.org/project/zen-galaxies/
+      url: https://test.pypi.org/project/zen-garden-plugins/
     permissions:
       id-token: write
     steps:
@@ -277,13 +277,13 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
 
   release-pypi:
-    if: ${{ github.repository == 'ZEN-universe/ZEN-galaxies' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.repository == 'ZEN-universe/ZEN-garden-plugins' && github.ref == 'refs/heads/main' }}
     name: "Release to PyPI"
     runs-on: ubuntu-latest
     needs: build-package
     environment:
       name: pypi
-      url: https://pypi.org/project/zen-galaxies/
+      url: https://pypi.org/project/zen-garden-plugins/
     permissions:
       id-token: write
     steps:

@@ -52,7 +52,7 @@ jobs:
           
 
   matrix_prep:
-    if: ${{ github.repository == 'ZEN-universe/ZEN-galaxies' }}
+    if: ${{ github.repository == 'ZEN-universe/ZEN-garden-plugins' }}
     needs: check_skiptests
     runs-on: ubuntu-latest
     outputs:
@@ -81,7 +81,7 @@ jobs:
           filter: '[?runs_when==`${{ env.ENV_STATE }}` || runs_when==`${{ github.event_name }}` || runs_when==`always`]'
 
   build:
-    if: ${{ github.repository == 'ZEN-universe/ZEN-galaxies' }}
+    if: ${{ github.repository == 'ZEN-universe/ZEN-garden-plugins' }}
     # the testing
     needs: [matrix_prep, check_skiptests]
     strategy:
@@ -108,7 +108,7 @@ jobs:
         with:
             miniforge-variant: Miniforge3
             miniforge-version: latest
-            activate-environment: zen-galaxies-env
+            activate-environment: ZEN-garden-plugins-env
             use-mamba: true
 
       # date for the cache
