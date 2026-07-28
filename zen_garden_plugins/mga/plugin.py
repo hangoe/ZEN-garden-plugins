@@ -151,7 +151,7 @@ class MGA:
     """
 
     # Dims aggregated away per axis kind, besides the member dim itself.
-    _TECH_AGG = ["set_capacity_types", "set_location", "set_years"]
+    _TECH_AGG = ["set_capacity_types", "set_location", "set_time_steps_yearly"]
     _CARRIER_AGG = ["set_nodes", "set_time_steps_operation"]
 
     def __init__(
