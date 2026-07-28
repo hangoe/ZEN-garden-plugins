@@ -107,11 +107,11 @@ baseline (``<model>`` is the dataset name):
 .. code-block:: text
 
     <model>/                    baseline (written by ZEN-garden itself)
-    <model>_fmax_<axis>/        VMM maximum LP, one per design axis
-    <model>_fmin_<axis>/        VMM minimum LP, one per design axis
-    <model>_mga_iter_<i>/       weights mode: one folder per iteration
-    <model>_oracle_iter_<n>/    oracle mode: one folder per projection solve
-                                (numbering matches diagnostics.csv)
+    <model>_vmm_max_<axis>/    VMM maximum LP, one per design axis
+    <model>_vmm_min_<axis>/    VMM minimum LP, one per design axis
+    <model>_mga_iter_<i>/      weights mode: one folder per iteration
+    <model>_oracle_iter_<n>/   oracle mode: one folder per projection solve
+                               (numbering matches diagnostics.csv)
     <model>_oracle_summary/     polytope.npz + diagnostics.csv
 
 ``polytope.npz`` holds the outer approximation, the certified inner points,
@@ -127,6 +127,3 @@ Limitations
   objectives are rejected; see the module docstring of ``plugin.py``.
 * Config errors are only reported after the baseline solve (``after_solve``
   is the only event the plugin can use).
-* The end-to-end smoke test lives in the ZEN-garden branch
-  (``tests/test_mga_oracle_smoke.py`` there), because runs currently execute
-  the in-tree plugin copy; the unit tests live here under ``tests/mga``.

@@ -2,8 +2,7 @@
 
 These run in milliseconds and need neither a solver nor a dataset: axis
 config parsing, the config-key validation, row normalisation, and the
-polytope npz round-trip. The end-to-end behaviour is covered by the gated
-smoke test in the ZEN-garden branch (tests/test_mga_oracle_smoke.py there).
+polytope npz round-trip.
 """
 
 from types import SimpleNamespace
