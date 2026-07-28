@@ -23,6 +23,7 @@ dependencies = [
 
 [project.entry-points."zen_garden.plugins"]
 plugin_template = "zen_garden_plugins.plugin_template.plugin"
+mga = "zen_garden_plugins.mga.plugin"
 
 
 [project.optional-dependencies]
