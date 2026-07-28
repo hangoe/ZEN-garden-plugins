@@ -40,8 +40,7 @@ Configured via the "plugins.mga" block in config.json; unknown keys are
 rejected. Full config reference: the plugin's docs page in the
 ZEN-garden-plugins repo (docs/files/available_plugins/mga).
 
-pyoNearOpt compatibility (base vs patched package) is documented in
-oracle_driver.py.
+pyoNearOpt compatibility is documented in oracle_driver.py.
 """
 
 import logging
@@ -73,8 +72,8 @@ config = {
 _KNOWN_KEYS = {
     "plugins.mga": {"epsilon", "mode", "iterations", "axes", "oracle"},
     "plugins.mga.axes": {"technologies", "carrier_imports", "include_cost"},
-    "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "step2"},
-    "plugins.mga.oracle.step2": {
+    "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
+    "plugins.mga.oracle.max_min": {
         "formulation",
         "use_bigM",
         "big_M",
@@ -130,7 +129,7 @@ def validate_config(cfg) -> None:
         ("plugins.mga", cfg),
         ("plugins.mga.axes", cfg.get("axes", {})),
         ("plugins.mga.oracle", cfg.get("oracle", {})),
-        ("plugins.mga.oracle.step2", cfg.get("oracle", {}).get("step2", {})),
+        ("plugins.mga.oracle.max_min", cfg.get("oracle", {}).get("max_min", {})),
     ):
         unknown = sorted(set(block) - _KNOWN_KEYS[label])
         if unknown:

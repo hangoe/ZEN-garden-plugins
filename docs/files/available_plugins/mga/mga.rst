@@ -16,7 +16,7 @@ baseline model under a near-optimality budget in one of two modes:
   refines inner and outer polytope approximations of the near-optimal space
   until their maximal distance falls below a tolerance. The result is a
   certified map of the entire space (a polytope file plus one solved design
-  per iteration), not a fixed number of samples.
+  per iteration).
 
 The code lives in ``zen_garden_plugins/mga``: ``plugin.py`` (event handler
 and model interface), ``axes.py`` (exploration-axis parsing),
@@ -26,12 +26,11 @@ polytope npz schema with its reader and writer).
 Requirements
 ------------
 
-* A ZEN-garden that provides the ``after_solve`` event. This event is not in
-  a released version yet; until it is, use the ``feature/mga`` branch of
-  `max-steen/ZEN-garden <https://github.com/max-steen/ZEN-garden>`_.
+* A ZEN-garden that provides the ``after_solve`` event (not yet in a
+  released version).
 * Oracle mode additionally needs:
 
-  * **Gurobi** and a license -- the step-2 solver is hardcoded to Gurobi.
+  * **Gurobi** and a license -- the max-min solver is hardcoded to Gurobi.
   * **pyoNearOpt** (E. Turan, ETH Zurich) -- not public yet; request access
     and install it manually, e.g. ``pip install -e path/to/pyoNearOpt``.
     The plugin runs with the base (published) package; see the compatibility
@@ -65,12 +64,14 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     * ``initial_bounds``: ``"vmm"`` (default; two LPs per design axis yield
       certified bounds plus extreme designs) or a dict
       ``{axis: [lower, upper]}`` covering every design axis.
-    * ``step2`` (dict): ``formulation`` (``"kkt_milp"`` default, or
-      ``"dual_bilinear"`` with the patched pyoNearOpt), ``use_bigM``
-      (default true), ``big_M`` (default 1e8), ``t_max``,
-      ``solver_options`` (Gurobi options for the step-2 solves), and
-      ``certificate_time_limit`` (seconds, 0 = off; one long step-2 solve
-      after a non-converged loop to tighten the stored metric).
+    * ``max_min`` (dict) -- settings of the max-min distance problem that
+      picks each trial point and reports the metric: ``formulation``
+      (``"kkt_milp"`` default, or ``"dual_bilinear"``, which requires a
+      pyoNearOpt that includes this formulation), ``use_bigM`` (default
+      true), ``big_M`` (default 1e8), ``t_max``, ``solver_options`` (Gurobi
+      options for the max-min solves), and ``certificate_time_limit``
+      (seconds, 0 = off; one long max-min solve after a non-converged loop
+      to tighten the stored metric).
 
 Example (oracle mode):
 
@@ -91,7 +92,7 @@ Example (oracle mode):
                 },
                 "oracle": {
                     "tolerance": 0.1,
-                    "step2": {"solver_options": {"TimeLimit": 120}}
+                    "max_min": {"solver_options": {"TimeLimit": 120}}
                 }
             }
         }
