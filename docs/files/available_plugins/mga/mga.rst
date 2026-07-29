@@ -66,12 +66,12 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
       ``{axis: [lower, upper]}`` covering every design axis.
     * ``max_min`` (dict) -- settings of the max-min distance problem that
       picks each trial point and reports the metric: ``formulation``
-      (``"kkt_milp"`` default, or ``"dual_bilinear"``, which requires a
-      pyoNearOpt that includes this formulation), ``use_bigM`` (default
-      true), ``big_M`` (default 1e8), ``t_max``, ``solver_options`` (Gurobi
-      options for the max-min solves), and ``certificate_time_limit``
-      (seconds, 0 = off; one long max-min solve after a non-converged loop
-      to tighten the stored metric).
+      (``"kkt_milp"`` only -- ``"dual_bilinear"`` is not implemented and
+      raises error), ``use_bigM`` (default true), ``big_M`` (default 1e8),
+      ``t_max``, ``solver_options`` (Gurobi options for the max-min
+      solves), and ``certificate_time_limit`` (seconds, 0 = off; one long
+      max-min solve after a non-converged loop to tighten the stored
+      metric).
 
 Example (oracle mode):
 

@@ -13,6 +13,7 @@ import pint
 import pytest
 
 from zen_garden_plugins.mga.axes import Axis, axis_physical_unit, build_axis_groups
+from zen_garden_plugins.mga.oracle_driver import run_oracle_mode
 from zen_garden_plugins.mga.plugin import MGA, normalise_rows, validate_config
 from zen_garden_plugins.mga.polytope_io import (
     CARRIER_IMPORT,
@@ -98,6 +99,21 @@ def test_valid_config_passes():
 def test_unknown_config_keys_are_rejected(cfg):
     with pytest.raises(ValueError, match="Unknown MGA config key"):
         validate_config(cfg)
+
+
+# ------------------------------------------------------------------ oracle mode
+
+
+def test_oracle_mode_rejects_non_kkt_milp_formulation():
+    pytest.importorskip("pyoNearOpt")
+
+    class _StubMGA:
+        design_axes = ["dummy_axis"]  # only thing checked before 
+
+    with pytest.raises(ValueError, match="dual_bilinear"):
+        run_oracle_mode(
+            _StubMGA(), {"tolerance": 0.1, "max_min": {"formulation": "dual_bilinear"}}
+        )
 
 
 # -------------------------------------------------------------- supplied bounds

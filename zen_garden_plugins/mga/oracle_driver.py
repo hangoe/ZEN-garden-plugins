@@ -29,13 +29,14 @@ The solver is hardcoded to Gurobi: the max-min models need SOS1 constraints
 the certificate reads Gurobi's dual bound directly.
 
 pyoNearOpt compatibility: the base (published) package provides only the
-default "kkt_milp" formulation; "dual_bilinear" needs a pyoNearOpt that
-includes this formulation and fails otherwise. use_bigM defaults to true
-because the base package is only sound with the big-M encoding: under SOS1
-it reports the max-min INCUMBENT as the metric, which is not a valid upper
-bound on the max-min distance. Only set use_bigM = false (SOS1) if your
-pyoNearOpt reads the true dual bound (the version with the dual_bilinear
-addition does).
+default "kkt_milp" formulation. "dual_bilinear" would need a pyoNearOpt that
+includes this formulation. Here only Md (big-M vs SOS1) is forwarded to
+approximation(); formulation = "dual_bilinear" is not implemented in this
+plugin version. use_bigM defaults to true because the base package is only 
+sound with the big-M encoding: under SOS1 it reports the max-min INCUMBENT 
+as the metric, which is not a valid upper bound on the max-min distance. 
+Only set use_bigM = false (SOS1) if your pyoNearOpt reads the true dual bound 
+(the version with the dual_bilinear addition does).
 """
 
 import importlib.metadata
@@ -47,8 +48,6 @@ from pathlib import Path
 import pandas as pd
 
 from .polytope_io import Polytope, save_polytope
-
-FORMULATIONS = ("kkt_milp", "dual_bilinear")
 
 
 def run_oracle_mode(mga, oracle_cfg):
@@ -70,14 +69,12 @@ def run_oracle_mode(mga, oracle_cfg):
     initial_bounds = oracle_cfg.get("initial_bounds", "vmm")
     max_min_cfg = oracle_cfg.get("max_min", {})
     formulation = str(max_min_cfg.get("formulation", "kkt_milp")).lower()
-    if formulation not in FORMULATIONS:
+    if formulation != "kkt_milp":
         raise ValueError(
-            f"MGA oracle: unknown max-min formulation {formulation!r}; "
-            f"expected one of {list(FORMULATIONS)}."
+            f"MGA oracle: formulation {formulation!r} not implemented; "
+            f"only 'kkt_milp' is supported."
         )
-    # Only meaningful for kkt_milp; true is the sound default there (see
-    # module docstring).
-    use_bigM = bool(max_min_cfg.get("use_bigM", formulation == "kkt_milp"))
+    use_bigM = bool(max_min_cfg.get("use_bigM", True))
 
     # Step 1: bounds (and, with VMM, the extreme designs) must exist before
     # the projection model is added, because they define the coordinates.
@@ -105,9 +102,6 @@ def run_oracle_mode(mga, oracle_cfg):
 
     # Gurobi options for the max-min solves: solver defaults unless configured.
     solver_options = dict(max_min_cfg.get("solver_options", {}))
-    if formulation == "dual_bilinear":
-        # The bilinear objective needs Gurobi's global nonconvex-QP mode.
-        solver_options.setdefault("NonConvex", 2)
     # Gurobi output otherwise reaches the run log twice: once as console text
     # and once through the 'gurobipy' logger. Keep only the console copy.
     logging.getLogger("gurobipy").propagate = False
