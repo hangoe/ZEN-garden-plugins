@@ -88,24 +88,18 @@ def run_oracle_mode(mga, oracle_cfg):
 
     with _coordinate_warnings_suppressed():
         A0, b0 = mga.build_initial_outer_approximation()
-        approximation_kwargs = dict(
+        # In Base pyoNearOpt's approximation() big-M is enabled by passing a 
+        # numeric `Md` (None -> SOS1). kkt_milp is the only formulation. 
+        # `Md` passed to constructor, use_bigM is derived from whether Md is set.
+        Md = float(max_min_cfg.get("big_M", 1e8)) if use_bigM else None
+        poly = approximation(
             A=A0,
             X=initial_points,
             b=b0,
             name_list=list(mga.z_names),
-            use_bigM=use_bigM,
+            Md=Md
         )
-        # Only a pyoNearOpt with the dual_bilinear addition knows the
-        # keyword; the base package's sole formulation is kkt_milp, so
-        # omitting it is equivalent.
-        if formulation != "kkt_milp":
-            approximation_kwargs["formulation"] = formulation
-        poly = approximation(**approximation_kwargs)
-        # big_M bounds the KKT duals (pyoNearOpt default 1e3, used only with
-        # use_bigM). It must exceed the true duals or optima are cut off;
-        # pyoNearOpt raises when a dual reaches it, so the default here is
-        # simply generous. t_max caps the max-min distance (default 1e6).
-        poly.Md = float(max_min_cfg.get("big_M", 1e8))
+        # t_max caps the max-min distance (base default 1e6).
         if max_min_cfg.get("t_max") is not None:
             poly.t_max = float(max_min_cfg["t_max"])
 
