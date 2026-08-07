@@ -23,9 +23,19 @@ Schema:
     z_star_phys     (n_axes,)            cost-optimal baseline point, physical
     c_star          ()                   baseline net present cost
     epsilon         ()                   near-optimality slack
-    tolerance       ()                   ORACLE convergence tolerance
+    convergence_threshold ()             the run's target value for its
+                                         convergence criterion -- a max-min
+                                         L-infinity distance bound for oracle
+                                         mode, a CI-on-fraction-of-directions
+                                         target for support-function modes
     converged       () bool
-    final_max_min_distance ()            NaN if the run raised before a result
+    final_gap       ()                  worst-case gap between the outer and
+                                         inner approximation at the end of the
+                                         run -- a certified max-min distance
+                                         for oracle mode, the largest observed
+                                         support-function gap for
+                                         support-function modes; NaN if the
+                                         run raised before a result
     n_initial_rows  ()                   leading rows of A that form the
                                          initial box; the rest are cutting planes
     point_origin    (n_points,) str      z_star | max:<axis> | min:<axis> | iterate
@@ -64,9 +74,9 @@ NPZ_KEYS = (
     "z_star_phys",
     "c_star",
     "epsilon",
-    "tolerance",
+    "convergence_threshold",
     "converged",
-    "final_max_min_distance",
+    "final_gap",
     "n_initial_rows",
     "point_origin",
     "axis_meta_json",
@@ -90,9 +100,9 @@ class Polytope:
     z_star_phys: np.ndarray
     c_star: float
     epsilon: float
-    tolerance: float
+    convergence_threshold: float
     converged: bool
-    final_max_min_distance: float
+    final_gap: float
     n_initial_rows: int
     point_origin: list[str]
     meta: dict = field(repr=False)
@@ -147,9 +157,9 @@ def save_polytope(path, poly: Polytope) -> None:
         z_star_phys=np.asarray(poly.z_star_phys, dtype=float),
         c_star=float(poly.c_star),
         epsilon=float(poly.epsilon),
-        tolerance=float(poly.tolerance),
+        convergence_threshold=float(poly.convergence_threshold),
         converged=bool(poly.converged),
-        final_max_min_distance=float(poly.final_max_min_distance),
+        final_gap=float(poly.final_gap),
         n_initial_rows=int(poly.n_initial_rows),
         point_origin=np.array(poly.point_origin),
         axis_meta_json=np.array(json.dumps(poly.meta)),
@@ -212,9 +222,9 @@ def load_polytope(path) -> Polytope:
         z_star_phys=z_star,
         c_star=float(d["c_star"]),
         epsilon=float(d["epsilon"]),
-        tolerance=float(d["tolerance"]),
+        convergence_threshold=float(d["convergence_threshold"]),
         converged=bool(d["converged"]),
-        final_max_min_distance=float(d["final_max_min_distance"]),
+        final_gap=float(d["final_gap"]),
         n_initial_rows=int(d["n_initial_rows"]),
         point_origin=[str(o) for o in d["point_origin"]],
         meta=json.loads(str(d["axis_meta_json"])),

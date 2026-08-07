@@ -25,6 +25,7 @@ from zen_garden_plugins.mga.polytope_io import (
     phys_to_norm,
     save_polytope,
 )
+from zen_garden_plugins.mga.probabilistic_driver import run_probabilistic_mode
 
 TECHS = ["nuclear", "pv", "battery", "hydro_a", "hydro_b"]
 CARRIERS = ["biomass", "hydrogen"]
@@ -87,6 +88,17 @@ def test_valid_config_passes():
     )
 
 
+def test_valid_probabilistic_config_passes():
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": "probabilistic",
+            "axes": {"technologies": ["nuclear"], "include_cost": True},
+            "probabilistic": {"tolerance_prob": 0.9, "n_samples": 500},
+        }
+    )
+
+
 @pytest.mark.parametrize(
     "cfg",
     [
@@ -94,6 +106,7 @@ def test_valid_config_passes():
         {"axes": {"technolgies": []}},  # axes typo
         {"oracle": {"tolerance": 0.1, "max_iter": 10}},  # oracle typo
         {"oracle": {"max_min": {"milp_options": {}}}},  # renamed key
+        {"probabilistic": {"tolerance_probb": 0.9}},  # probabilistic typo
     ],
 )
 def test_unknown_config_keys_are_rejected(cfg):
@@ -114,6 +127,19 @@ def test_oracle_mode_rejects_non_kkt_milp_formulation():
         run_oracle_mode(
             _StubMGA(), {"tolerance": 0.1, "max_min": {"formulation": "dual_bilinear"}}
         )
+
+
+# ------------------------------------------------------------ probabilistic mode
+
+
+def test_probabilistic_mode_requires_exploration_axes():
+    pytest.importorskip("pyoNearOpt")
+
+    class _StubMGA:
+        design_axes = []  # no axes configured
+
+    with pytest.raises(ValueError, match="no exploration axes configured"):
+        run_probabilistic_mode(_StubMGA(), {"tolerance_prob": 0.9})
 
 
 # -------------------------------------------------------------- supplied bounds
@@ -207,9 +233,9 @@ def _polytope() -> Polytope:
         z_star_phys=np.array([11.0, 155584.6, 1.25e9]),
         c_star=1.25e9,
         epsilon=0.1,
-        tolerance=0.1,
+        convergence_threshold=0.1,
         converged=False,
-        final_max_min_distance=0.26,
+        final_gap=0.26,
         n_initial_rows=4,
         point_origin=["z_star", "max:nuclear"],
         meta={"axes": [{"name": "nuclear"}], "normalisation": "affine"},

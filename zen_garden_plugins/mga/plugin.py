@@ -12,6 +12,12 @@ under one of two modes:
   refines inner and outer polytope approximations of the near-optimal space
   via L-infinity projections. The refinement loop lives in pyoNearOpt; the
   projection solves run on the ZEN-garden model (driver in oracle_driver.py).
+* "probabilistic": pyoNearOpt's probabilistic support-function method
+  iteratively refines the same inner/outer approximations by sampling
+  directions and probing each with a single support-function LP (much
+  cheaper than ORACLE's projection). The refinement loop lives in
+  pyoNearOpt; the support-function solves run on the ZEN-garden model
+  (driver in probabilistic_driver.py).
 
 Rolling-horizon runs are rejected: after_solve fires after the horizon loop,
 so the plugin would only see the final step's model. Scaled runs
@@ -54,6 +60,7 @@ from zen_garden.postprocess.postprocess import Postprocess
 from .axes import COST_VARIABLE, Axis, axis_physical_unit, build_axis_groups
 from .oracle_driver import run_oracle_mode
 from .polytope_io import CARRIER_IMPORT, TECH_CAPACITY, TOTAL_COST
+from .probabilistic_driver import run_probabilistic_mode
 
 # Module-level config, updated by the plugin loader with the user's
 # "plugins.mga" block. The merge is a SHALLOW dict.update: nested dicts like
@@ -65,12 +72,13 @@ config = {
     "iterations": [],
     "axes": {},
     "oracle": {},
+    "probabilistic": {},
 }
 
 # Recognised config keys per block; anything else is rejected rather than
 # silently ignored.
 _KNOWN_KEYS = {
-    "plugins.mga": {"epsilon", "mode", "iterations", "axes", "oracle"},
+    "plugins.mga": {"epsilon", "mode", "iterations", "axes", "oracle", "probabilistic"},
     "plugins.mga.axes": {"technologies", "carrier_imports", "include_cost"},
     "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
     "plugins.mga.oracle.max_min": {
@@ -80,6 +88,17 @@ _KNOWN_KEYS = {
         "t_max",
         "solver_options",
         "certificate_time_limit",
+    },
+    "plugins.mga.probabilistic": {
+        "tolerance_prob",
+        "max_iterations",
+        "tolerance_explore",
+        "n_samples",
+        "alpha",
+        "method",
+        "initial_bounds",
+        "use_bounding_box",
+        "seed_rng",
     },
 }
 
@@ -130,6 +149,7 @@ def validate_config(cfg) -> None:
         ("plugins.mga.axes", cfg.get("axes", {})),
         ("plugins.mga.oracle", cfg.get("oracle", {})),
         ("plugins.mga.oracle.max_min", cfg.get("oracle", {}).get("max_min", {})),
+        ("plugins.mga.probabilistic", cfg.get("probabilistic", {})),
     ):
         unknown = sorted(set(block) - _KNOWN_KEYS[label])
         if unknown:
@@ -837,6 +857,51 @@ class MGA:
         self._iter_count += 1
         return z_feas, dist, mu_cut, b_cut, 0
 
+    # ------------------------------------------------------------------
+    # probabilistic mode: support-function callback
+    # ------------------------------------------------------------------
+
+    def support_function(self, direction: np.ndarray):
+        """pyoNearOpt callback for support-function methods (e.g.
+        probabilistic): the point maximising `direction` and its value.
+
+        `direction` arrives in normalised coordinates. Unlike
+        `find_nearest_point`, this needs no persistent model state: the
+        near-optimality constraint from `setup()` already bounds the
+        feasible set, so each call just swaps the objective to
+        max sum_i direction_i * axis_i (rescaled into physical units) and
+        solves, exactly like `run_iteration` does in weights mode. pyoNearOpt
+        owns the resulting cut's validity (`approximation.add_cut` repairs
+        infeasible offsets itself), so no cut-validity guard is needed here.
+
+        Returns (z_feas, support_value): z_feas is the solution in normalised
+        coordinates, support_value = direction @ z_feas.
+        """
+        if direction.shape != (self.n_z,):
+            raise ValueError(f"direction shape {direction.shape}, expected ({self.n_z},)")
+
+        obj = sum(
+            (float(direction[i]) / self.scale[i]) * self.axis_expression(axis)
+            for i, axis in enumerate(self.axes)
+        )
+        self.model.add_objective(obj, sense="max", overwrite=True)
+
+        label = f"probabilistic_iter_{self._iter_count}"
+        logging.info(
+            f"MGA probabilistic: starting iteration {self._iter_count}, "
+            f"||direction||_2 = {np.linalg.norm(direction):.4g}"
+        )
+        self._solve_and_postprocess(label)
+
+        z_feas = self.current_point_norm()
+        support_value = float(direction @ z_feas)
+        logging.info(
+            f"MGA probabilistic iter {self._iter_count}: support_value = "
+            f"{support_value:.4g}"
+        )
+        self._iter_count += 1
+        return z_feas, support_value
+
 
 # ----------------------------------------------------------------------
 # Event handler and mode dispatch
@@ -853,8 +918,11 @@ def run_mga(
     """
     validate_config(config)
     mode = config["mode"]
-    if mode not in ("weights", "oracle"):
-        raise ValueError(f"Unknown MGA mode: {mode!r}. Expected 'weights' or 'oracle'.")
+    if mode not in ("weights", "oracle", "probabilistic"):
+        raise ValueError(
+            f"Unknown MGA mode: {mode!r}. Expected 'weights', 'oracle' or "
+            f"'probabilistic'."
+        )
     if optimization_setup.system.use_rolling_horizon:
         raise ValueError(
             "MGA does not support rolling-horizon runs: after_solve fires "
@@ -898,7 +966,9 @@ def run_mga(
     if mode == "weights":
         for i, iteration in enumerate(config["iterations"]):
             mga.run_iteration(iteration["weights"], i)
-    else:
+    elif mode == "oracle":
         result = run_oracle_mode(mga, config["oracle"])
+    else:
+        result = run_probabilistic_mode(mga, config["probabilistic"])
     logging.info("MGA: complete.")
     return result
