@@ -1,13 +1,30 @@
 """Probabilistic-mode driver for the MGA plugin.
 
 Wires MGA.support_function into pyoNearOpt's probabilistic support-function
-exploration (`prob_direction_explore`). Unlike ORACLE, this family never
-solves a bilevel/MILP model: each iteration samples candidate directions,
-picks the one with the largest observed gap between the inner and outer
-polytope approximations, and probes it with a single support-function LP
-(`MGA.support_function`) on the ZEN-garden model. pyoNearOpt drives the loop
-itself (`explorer.explore(n_iter)`) and owns the polytope bookkeeping
-(`poly_approx.add_point`/`add_cut`).
+exploration. Unlike ORACLE, this family never solves a bilevel/MILP model:
+each iteration samples candidate directions, picks the one with the largest
+observed gap between the inner and outer polytope approximations, and probes
+it with a single support-function LP (`MGA.support_function`) on the
+ZEN-garden model.
+
+As of near_optimal_tools' package_version branch (post commit 73d5359,
+"rename heurestic to bbo, prob to sampling", and 7dd8e6f, "refactor to a
+single exploration loop for all sup fun methods"), the old monolithic
+`prob_ORACLE.prob_direction_explore` no longer exists. It is replaced by
+three composable pieces:
+  - `supf_explore`: the generic exploration harness that drives the loop
+    (`explorer.explore(n_iter)`) and owns the polytope bookkeeping
+    (`poly_approx.add_point`/`add_cut`), same as before.
+  - `sampling_exploration`: the strategy that samples candidate directions
+    and picks the one with the largest gap (what `prob_direction_explore`
+    used to do internally).
+  - `ci_convergence_metric`: decides convergence from the same confidence
+    interval on the fraction of well-approximated directions that
+    `prob_direction_explore.estimate_fraction_of_directions` used to compute.
+The harness checks `metric` before every iteration's query (as
+`prob_direction_explore.explore` used to), so a final, fresh convergence
+check after the loop is still needed -- see the comment in
+`run_probabilistic_mode` below.
 
 No Gurobi dependency: the only ZEN-garden-model solve is the LP inside
 `support_function`, using whatever solver the run is already configured
@@ -34,7 +51,9 @@ def run_probabilistic_mode(mga, cfg):
     Returns the summary directory holding the polytope npz and diagnostics.
     """
     # Imported lazily so weights mode works without pyoNearOpt installed.
-    from pyoNearOpt.exploration_methods.prob_ORACLE import prob_direction_explore
+    from pyoNearOpt.exploration_methods.sampling_ORACLE import sampling_exploration
+    from pyoNearOpt.exploration_methods.supf_explore import supf_explore
+    from pyoNearOpt.metrics import ci_convergence_metric
     from pyoNearOpt.polytope_approximation.approximation_class import approximation
 
     if not mga.design_axes:
@@ -59,16 +78,38 @@ def run_probabilistic_mode(mga, cfg):
     A0, b0 = mga.build_initial_outer_approximation()
     poly = approximation(A=A0, X=initial_points, b=b0, name_list=list(mga.z_names))
 
-    explorer = prob_direction_explore(
-        support_function=mga.support_function,
-        poly_approx=poly,
+    alpha = float(cfg.get("alpha", 0.05))
+    method = cfg.get("method", "jeffreys")
+    seed_rng = cfg.get("seed_rng")
+
+    exploration = sampling_exploration(
+        n_samples=n_samples,
+        tolerance_explore=tolerance_explore,
+        alpha=alpha,
+        method=method,
+        use_bounding_box=bool(cfg.get("use_bounding_box", False)),
+        seed_rng=seed_rng,
+        print_lv=1,
+    )
+    # Same tolerance_prob/tolerance_explore/n_samples/alpha/method as
+    # `exploration` above, so the convergence check and the direction search
+    # agree on what "well-approximated" means; seeded independently (its own
+    # sampling_exploration-style RNG), which only changes which random
+    # directions each draws, not the semantics.
+    metric = ci_convergence_metric(
         tolerance_prob=tolerance_prob,
         tolerance_explore=tolerance_explore,
         n_samples=n_samples,
-        alpha=float(cfg.get("alpha", 0.05)),
-        method=cfg.get("method", "jeffreys"),
-        use_bounding_box=bool(cfg.get("use_bounding_box", False)),
-        seed_rng=cfg.get("seed_rng"),
+        alpha=alpha,
+        method=method,
+        seed_rng=seed_rng,
+        print_lv=1,
+    )
+    explorer = supf_explore(
+        support_function=mga.support_function,
+        poly_approx=poly,
+        exploration=exploration,
+        metric=metric,
         history=True,
         print_lv=1,
     )
@@ -91,14 +132,21 @@ def run_probabilistic_mode(mga, cfg):
     final_gap = float("nan")
     try:
         _, iteration_history = explorer.explore(max_iterations)
-        # explorer.explore() itself decides convergence from a fresh CI
-        # estimate on the final approximation; ask it the same question
-        # again rather than inferring the answer from its internal
-        # bookkeeping (e.g. history-list lengths), which would silently
-        # start reporting the wrong thing if pyoNearOpt's internals change.
-        _, _, ci_lower, _, progress_metrics = explorer.estimate_fraction_of_directions()
-        converged = bool(ci_lower > tolerance_prob)
-        final_gap = float(progress_metrics["max_gap"])
+        # supf_explore checks `metric` at the *start* of every iteration,
+        # before that iteration's point/cut are added to `poly`; so its last
+        # recorded check does not reflect the final query when the loop runs
+        # out of max_iterations without converging. Ask the same question
+        # again on the now-final `poly`, rather than inferring the answer
+        # from internal bookkeeping (e.g. history-list lengths), which would
+        # silently start reporting the wrong thing if pyoNearOpt's internals
+        # change.
+        converged, final_metrics = metric.evaluate(poly, iteration=len(iteration_history))
+        final_gap = float(final_metrics["max_gap"])
+        # Merge each iteration's convergence check (ci_lower, ci_upper,
+        # mean_gap, max_gap) into the same row of the saved diagnostics, as
+        # the pre-refactor prob_direction_explore.explore() used to.
+        for entry, metric_fields in zip(iteration_history, explorer.convergence_history):
+            entry.update(metric_fields)
     finally:
         # Persist artifacts even if the loop raised mid-way.
         run_info = {
