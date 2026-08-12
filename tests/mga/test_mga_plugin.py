@@ -25,7 +25,7 @@ from zen_garden_plugins.mga.polytope_io import (
     phys_to_norm,
     save_polytope,
 )
-from zen_garden_plugins.mga.probabilistic_driver import run_probabilistic_mode
+from zen_garden_plugins.mga.supf_driver import run_bbo_mode, run_sampling_mode
 
 TECHS = ["nuclear", "pv", "battery", "hydro_a", "hydro_b"]
 CARRIERS = ["biomass", "hydrogen"]
@@ -88,13 +88,24 @@ def test_valid_config_passes():
     )
 
 
-def test_valid_probabilistic_config_passes():
+def test_valid_sampling_config_passes():
     validate_config(
         {
             "epsilon": 0.1,
-            "mode": "probabilistic",
+            "mode": "sampling",
             "axes": {"technologies": ["nuclear"], "include_cost": True},
-            "probabilistic": {"tolerance_prob": 0.9, "n_samples": 500},
+            "sampling": {"tolerance_prob": 0.9, "n_samples": 500},
+        }
+    )
+
+
+def test_valid_bbo_config_passes():
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": "bbo",
+            "axes": {"technologies": ["nuclear"], "include_cost": True},
+            "bbo": {"tolerance_prob": 0.9, "max_function_evaluations": 500},
         }
     )
 
@@ -106,7 +117,8 @@ def test_valid_probabilistic_config_passes():
         {"axes": {"technolgies": []}},  # axes typo
         {"oracle": {"tolerance": 0.1, "max_iter": 10}},  # oracle typo
         {"oracle": {"max_min": {"milp_options": {}}}},  # renamed key
-        {"probabilistic": {"tolerance_probb": 0.9}},  # probabilistic typo
+        {"sampling": {"tolerance_probb": 0.9}},  # sampling typo
+        {"bbo": {"tolerance_probb": 0.9}},  # bbo typo
     ],
 )
 def test_unknown_config_keys_are_rejected(cfg):
@@ -129,17 +141,28 @@ def test_oracle_mode_rejects_non_kkt_milp_formulation():
         )
 
 
-# ------------------------------------------------------------ probabilistic mode
+# ----------------------------------------------------------- support-function modes
 
 
-def test_probabilistic_mode_requires_exploration_axes():
+def test_sampling_mode_requires_exploration_axes():
     pytest.importorskip("pyoNearOpt")
 
     class _StubMGA:
         design_axes = []  # no axes configured
 
     with pytest.raises(ValueError, match="no exploration axes configured"):
-        run_probabilistic_mode(_StubMGA(), {"tolerance_prob": 0.9})
+        run_sampling_mode(_StubMGA(), {"tolerance_prob": 0.9})
+
+
+def test_bbo_mode_requires_exploration_axes():
+    pytest.importorskip("pyoNearOpt")
+    pytest.importorskip("pypop7")
+
+    class _StubMGA:
+        design_axes = []  # no axes configured
+
+    with pytest.raises(ValueError, match="no exploration axes configured"):
+        run_bbo_mode(_StubMGA(), {"tolerance_prob": 0.9})
 
 
 # -------------------------------------------------------------- supplied bounds

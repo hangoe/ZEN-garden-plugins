@@ -12,12 +12,16 @@ under one of two modes:
   refines inner and outer polytope approximations of the near-optimal space
   via L-infinity projections. The refinement loop lives in pyoNearOpt; the
   projection solves run on the ZEN-garden model (driver in oracle_driver.py).
-* "probabilistic": pyoNearOpt's probabilistic support-function method
-  iteratively refines the same inner/outer approximations by sampling
-  directions and probing each with a single support-function LP (much
-  cheaper than ORACLE's projection). The refinement loop lives in
-  pyoNearOpt; the support-function solves run on the ZEN-garden model
-  (driver in probabilistic_driver.py).
+* "sampling": pyoNearOpt's sampling support-function method iteratively
+  refines the same inner/outer approximations by sampling directions and
+  probing each with a single support-function LP (much cheaper than
+  ORACLE's projection). The refinement loop lives in pyoNearOpt; the
+  support-function solves run on the ZEN-garden model (driver in
+  supf_driver.py).
+* "bbo": the same support-function pipeline as "sampling", but each
+  direction is instead chosen by a black-box optimiser (SHADE) searching
+  for the largest gap between the inner and outer approximations. Needs
+  pyoNearOpt's optional "bbo" extra (pypop7). Driver in supf_driver.py.
 
 Rolling-horizon runs are rejected: after_solve fires after the horizon loop,
 so the plugin would only see the final step's model. Scaled runs
@@ -60,7 +64,7 @@ from zen_garden.postprocess.postprocess import Postprocess
 from .axes import COST_VARIABLE, Axis, axis_physical_unit, build_axis_groups
 from .oracle_driver import run_oracle_mode
 from .polytope_io import CARRIER_IMPORT, TECH_CAPACITY, TOTAL_COST
-from .probabilistic_driver import run_probabilistic_mode
+from .supf_driver import run_bbo_mode, run_sampling_mode
 
 # Module-level config, updated by the plugin loader with the user's
 # "plugins.mga" block. The merge is a SHALLOW dict.update: nested dicts like
@@ -72,13 +76,14 @@ config = {
     "iterations": [],
     "axes": {},
     "oracle": {},
-    "probabilistic": {},
+    "sampling": {},
+    "bbo": {},
 }
 
 # Recognised config keys per block; anything else is rejected rather than
 # silently ignored.
 _KNOWN_KEYS = {
-    "plugins.mga": {"epsilon", "mode", "iterations", "axes", "oracle", "probabilistic"},
+    "plugins.mga": {"epsilon", "mode", "iterations", "axes", "oracle", "sampling", "bbo"},
     "plugins.mga.axes": {"technologies", "carrier_imports", "include_cost"},
     "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
     "plugins.mga.oracle.max_min": {
@@ -89,7 +94,7 @@ _KNOWN_KEYS = {
         "solver_options",
         "certificate_time_limit",
     },
-    "plugins.mga.probabilistic": {
+    "plugins.mga.sampling": {
         "tolerance_prob",
         "max_iterations",
         "tolerance_explore",
@@ -99,6 +104,20 @@ _KNOWN_KEYS = {
         "initial_bounds",
         "use_bounding_box",
         "seed_rng",
+    },
+    "plugins.mga.bbo": {
+        "tolerance_prob",
+        "max_iterations",
+        "tolerance_explore",
+        "n_samples",
+        "alpha",
+        "method",
+        "initial_bounds",
+        "use_bounding_box",
+        "seed_rng",
+        "max_function_evaluations",
+        "n_restarts",
+        "optimizer_options",
     },
 }
 
@@ -149,7 +168,8 @@ def validate_config(cfg) -> None:
         ("plugins.mga.axes", cfg.get("axes", {})),
         ("plugins.mga.oracle", cfg.get("oracle", {})),
         ("plugins.mga.oracle.max_min", cfg.get("oracle", {}).get("max_min", {})),
-        ("plugins.mga.probabilistic", cfg.get("probabilistic", {})),
+        ("plugins.mga.sampling", cfg.get("sampling", {})),
+        ("plugins.mga.bbo", cfg.get("bbo", {})),
     ):
         unknown = sorted(set(block) - _KNOWN_KEYS[label])
         if unknown:
@@ -858,12 +878,12 @@ class MGA:
         return z_feas, dist, mu_cut, b_cut, 0
 
     # ------------------------------------------------------------------
-    # probabilistic mode: support-function callback
+    # support-function modes (sampling, bbo): support-function callback
     # ------------------------------------------------------------------
 
     def support_function(self, direction: np.ndarray):
-        """pyoNearOpt callback for support-function methods (e.g.
-        probabilistic): the point maximising `direction` and its value.
+        """pyoNearOpt callback for support-function methods (sampling, bbo):
+        the point maximising `direction` and its value.
 
         `direction` arrives in normalised coordinates. Unlike
         `find_nearest_point`, this needs no persistent model state: the
@@ -886,9 +906,9 @@ class MGA:
         )
         self.model.add_objective(obj, sense="max", overwrite=True)
 
-        label = f"probabilistic_iter_{self._iter_count}"
+        label = f"supf_iter_{self._iter_count}"
         logging.info(
-            f"MGA probabilistic: starting iteration {self._iter_count}, "
+            f"MGA support_function: starting iteration {self._iter_count}, "
             f"||direction||_2 = {np.linalg.norm(direction):.4g}"
         )
         self._solve_and_postprocess(label)
@@ -896,7 +916,7 @@ class MGA:
         z_feas = self.current_point_norm()
         support_value = float(direction @ z_feas)
         logging.info(
-            f"MGA probabilistic iter {self._iter_count}: support_value = "
+            f"MGA support_function iter {self._iter_count}: support_value = "
             f"{support_value:.4g}"
         )
         self._iter_count += 1
@@ -918,10 +938,10 @@ def run_mga(
     """
     validate_config(config)
     mode = config["mode"]
-    if mode not in ("weights", "oracle", "probabilistic"):
+    if mode not in ("weights", "oracle", "sampling", "bbo"):
         raise ValueError(
-            f"Unknown MGA mode: {mode!r}. Expected 'weights', 'oracle' or "
-            f"'probabilistic'."
+            f"Unknown MGA mode: {mode!r}. Expected 'weights', 'oracle', "
+            f"'sampling' or 'bbo'."
         )
     if optimization_setup.system.use_rolling_horizon:
         raise ValueError(
@@ -968,7 +988,9 @@ def run_mga(
             mga.run_iteration(iteration["weights"], i)
     elif mode == "oracle":
         result = run_oracle_mode(mga, config["oracle"])
+    elif mode == "sampling":
+        result = run_sampling_mode(mga, config["sampling"])
     else:
-        result = run_probabilistic_mode(mga, config["probabilistic"])
+        result = run_bbo_mode(mga, config["bbo"])
     logging.info("MGA: complete.")
     return result
