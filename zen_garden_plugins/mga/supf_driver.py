@@ -85,6 +85,33 @@ def run_bbo_mode(mga, cfg):
     return _run_supf_mode(mga, cfg, "bbo", exploration)
 
 
+def _setup_bounds_and_approximation(mga, mode, initial_bounds):
+    """Bounds (and, with VMM, extreme designs) plus the initial polytope
+    approximation -- shared setup for sampling/bbo/batch modes.
+
+    Raises ValueError if no exploration axes are configured.
+
+    Returns (poly, point_origin, supplied): `poly` is the initial
+    `approximation`, `point_origin` labels its seed points, and `supplied`
+    is `None` when bounds came from VMM, or the bounds dict otherwise.
+    """
+    # Imported lazily so weights mode works without pyoNearOpt installed.
+    from pyoNearOpt.polytope_approximation.approximation_class import approximation
+
+    if not mga.design_axes:
+        raise ValueError(
+            f"MGA {mode}: no exploration axes configured; set "
+            f"plugins.mga.axes.technologies and/or axes.carrier_imports."
+        )
+    supplied = None if initial_bounds == "vmm" else initial_bounds
+    mga.solve_axis_bounds(supplied)
+    initial_points, point_origin = mga.initial_inner_points()
+
+    A0, b0 = mga.build_initial_outer_approximation()
+    poly = approximation(A=A0, X=initial_points, b=b0, name_list=list(mga.z_names))
+    return poly, point_origin, supplied
+
+
 def _run_supf_mode(mga, cfg, mode, exploration):
     """Shared explore-loop and artifact save for supf_explore-based modes.
 
@@ -96,13 +123,7 @@ def _run_supf_mode(mga, cfg, mode, exploration):
     # Imported lazily so weights mode works without pyoNearOpt installed.
     from pyoNearOpt.exploration_methods.supf_explore import supf_explore
     from pyoNearOpt.metrics import ci_convergence_metric
-    from pyoNearOpt.polytope_approximation.approximation_class import approximation
 
-    if not mga.design_axes:
-        raise ValueError(
-            f"MGA {mode}: no exploration axes configured; set "
-            f"plugins.mga.axes.technologies and/or axes.carrier_imports."
-        )
     tolerance_prob = float(cfg["tolerance_prob"])  # required, deliberately no default
     max_iterations = int(cfg.get("max_iterations", 200))
     tolerance_explore = float(cfg.get("tolerance_explore", 0.1))
@@ -112,16 +133,7 @@ def _run_supf_mode(mga, cfg, mode, exploration):
     seed_rng = cfg.get("seed_rng")
     initial_bounds = cfg.get("initial_bounds", "vmm")
 
-    # Step 1: bounds (and, with VMM, the extreme designs) must exist before
-    # the outer approximation is built, because they define the coordinates.
-    # Unlike oracle mode, no projection model is needed: support_function
-    # reuses the model as-is, swapping only the objective per call.
-    supplied = None if initial_bounds == "vmm" else initial_bounds
-    mga.solve_axis_bounds(supplied)
-    initial_points, point_origin = mga.initial_inner_points()
-
-    A0, b0 = mga.build_initial_outer_approximation()
-    poly = approximation(A=A0, X=initial_points, b=b0, name_list=list(mga.z_names))
+    poly, point_origin, supplied = _setup_bounds_and_approximation(mga, mode, initial_bounds)
 
     # Same tolerance_prob/tolerance_explore/n_samples/alpha/method as
     # `exploration`, so the convergence check and the direction search agree

@@ -22,6 +22,12 @@ under one of two modes:
   direction is instead chosen by a black-box optimiser (SHADE) searching
   for the largest gap between the inner and outer approximations. Needs
   pyoNearOpt's optional "bbo" extra (pypop7). Driver in supf_driver.py.
+* "batch": the same support-function pipeline as "sampling"/"bbo", but each
+  iteration probes a *batch* of directions concurrently via a persistent
+  worker pool, instead of one direction at a time. Writes one Postprocess
+  folder per query, like "sampling"/"bbo". Always needs pyoNearOpt's
+  optional "bbo" extra (pypop7), even with strategy_mode="sampling".
+  Driver in batch_driver.py, worker pool in parallel_solve.py.
 
 Rolling-horizon runs are rejected: after_solve fires after the horizon loop,
 so the plugin would only see the final step's model. Scaled runs
@@ -65,6 +71,7 @@ from zen_garden.plugin_system.events import Event, EventPublisher
 from zen_garden.postprocess.postprocess import Postprocess
 
 from .axes import COST_VARIABLE, Axis, axis_physical_unit, build_axis_groups
+from .batch_driver import run_batch_mode
 from .oracle_driver import run_oracle_mode
 from .polytope_io import CARRIER_IMPORT, TECH_CAPACITY, TOTAL_COST
 from .supf_driver import run_bbo_mode, run_sampling_mode
@@ -82,6 +89,7 @@ config = {
     "oracle": {},
     "sampling": {},
     "bbo": {},
+    "batch": {},
 }
 
 # Recognised config keys per block; anything else is rejected rather than
@@ -96,6 +104,7 @@ _KNOWN_KEYS = {
         "oracle",
         "sampling",
         "bbo",
+        "batch",
     },
     "plugins.mga.axes": {"technologies", "carrier_imports", "include_cost"},
     "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
@@ -131,6 +140,24 @@ _KNOWN_KEYS = {
         "max_function_evaluations",
         "n_restarts",
         "optimizer_options",
+    },
+    "plugins.mga.batch": {
+        "tolerance_prob",
+        "max_iterations",
+        "tolerance_explore",
+        "n_samples",
+        "alpha",
+        "method",
+        "initial_bounds",
+        "use_bounding_box",
+        "seed_rng",
+        "batch_size",
+        "strategy_mode",
+        "convergence_mode",
+        "max_function_evaluations",
+        "n_restarts",
+        "bbo_enabled",
+        "n_workers",
     },
 }
 
@@ -183,6 +210,7 @@ def validate_config(cfg) -> None:
         ("plugins.mga.oracle.max_min", cfg.get("oracle", {}).get("max_min", {})),
         ("plugins.mga.sampling", cfg.get("sampling", {})),
         ("plugins.mga.bbo", cfg.get("bbo", {})),
+        ("plugins.mga.batch", cfg.get("batch", {})),
     ):
         unknown = sorted(set(block) - _KNOWN_KEYS[label])
         if unknown:
@@ -937,18 +965,12 @@ class MGA:
     # support-function modes (sampling, bbo): support-function callback
     # ------------------------------------------------------------------
 
-    def support_function(self, direction: np.ndarray):
-        """pyoNearOpt callback for support-function methods (sampling, bbo):
-        the point maximising `direction` and its value.
+    def solve_direction(self, direction: np.ndarray, label: str):
+        """Set the objective to `direction`, solve, postprocess to `label`.
 
-        `direction` arrives in normalised coordinates. Unlike
-        `find_nearest_point`, this needs no persistent model state: the
-        near-optimality constraint from `setup()` already bounds the
-        feasible set, so each call just swaps the objective to
-        max sum_i direction_i * axis_i (rescaled into physical units) and
-        solves, exactly like `run_iteration` does in weights mode. pyoNearOpt
-        owns the resulting cut's validity (`approximation.add_cut` repairs
-        infeasible offsets itself), so no cut-validity guard is needed here.
+        Shared unit of work behind `support_function` (sequential modes)
+        and batch mode's workers, which call this directly with their own
+        label instead of `_iter_count`.
 
         Returns (z_feas, support_value): z_feas is the solution in normalised
         coordinates, support_value = direction @ z_feas.
@@ -962,19 +984,28 @@ class MGA:
         )
         self.model.add_objective(obj, sense="max", overwrite=True)
 
-        label = f"supf_iter_{self._iter_count}"
-        logging.info(
-            f"MGA support_function: starting iteration {self._iter_count}, "
-            f"||direction||_2 = {np.linalg.norm(direction):.4g}"
-        )
+        logging.info(f"MGA solve_direction {label!r}: ||direction||_2 = {np.linalg.norm(direction):.4g}")
         self._solve_and_postprocess(label)
 
         z_feas = self.current_point_norm()
         support_value = float(direction @ z_feas)
-        logging.info(
-            f"MGA support_function iter {self._iter_count}: support_value = "
-            f"{support_value:.4g}"
-        )
+        logging.info(f"MGA solve_direction {label!r}: support_value = {support_value:.4g}")
+        return z_feas, support_value
+
+    def support_function(self, direction: np.ndarray):
+        """pyoNearOpt callback for support-function methods (sampling, bbo):
+        the point maximising `direction` and its value.
+
+        Thin wrapper around `solve_direction` that owns the `supf_iter_<n>`
+        iteration-labeling/counting sequential modes use.
+
+        Returns (z_feas, support_value): z_feas is the solution in normalised
+        coordinates, support_value = direction @ z_feas.
+        """
+        label = f"supf_iter_{self._iter_count}"
+        logging.info(f"MGA support_function: starting iteration {self._iter_count}")
+        z_feas, support_value = self.solve_direction(direction, label)
+        logging.info(f"MGA support_function iter {self._iter_count}: support_value = {support_value:.4g}")
         self._iter_count += 1
         return z_feas, support_value
 
@@ -994,10 +1025,10 @@ def run_mga(
     """
     validate_config(config)
     mode = config["mode"]
-    if mode not in ("weights", "oracle", "sampling", "bbo"):
+    if mode not in ("weights", "oracle", "sampling", "bbo", "batch"):
         raise ValueError(
             f"Unknown MGA mode: {mode!r}. Expected 'weights', 'oracle', "
-            f"'sampling' or 'bbo'."
+            f"'sampling', 'bbo' or 'batch'."
         )
     if optimization_setup.system.use_rolling_horizon:
         raise ValueError(
@@ -1047,7 +1078,9 @@ def run_mga(
         result = run_oracle_mode(mga, config["oracle"])
     elif mode == "sampling":
         result = run_sampling_mode(mga, config["sampling"])
-    else:
+    elif mode == "bbo":
         result = run_bbo_mode(mga, config["bbo"])
+    else:
+        result = run_batch_mode(mga, config["batch"])
     logging.info("MGA: complete.")
     return result

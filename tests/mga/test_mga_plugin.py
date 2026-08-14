@@ -25,6 +25,7 @@ from zen_garden_plugins.mga.polytope_io import (
     phys_to_norm,
     save_polytope,
 )
+from zen_garden_plugins.mga.batch_driver import run_batch_mode
 from zen_garden_plugins.mga.supf_driver import run_bbo_mode, run_sampling_mode
 
 TECHS = ["nuclear", "pv", "battery", "hydro_a", "hydro_b"]
@@ -110,6 +111,23 @@ def test_valid_bbo_config_passes():
     )
 
 
+def test_valid_batch_config_passes():
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": "batch",
+            "axes": {"technologies": ["nuclear"], "include_cost": True},
+            "batch": {
+                "tolerance_prob": 0.9,
+                "batch_size": 8,
+                "strategy_mode": "sampling",
+                "convergence_mode": "ci",
+                "n_workers": 4,
+            },
+        }
+    )
+
+
 @pytest.mark.parametrize("mode", ["sampling", "bbo"])
 def test_units_normalisation_accepted_in_sampling_and_bbo_modes(mode):
     validate_config(
@@ -150,6 +168,7 @@ def test_unknown_normalisation_value_is_rejected():
         {"oracle": {"max_min": {"milp_options": {}}}},  # renamed key
         {"sampling": {"tolerance_probb": 0.9}},  # sampling typo
         {"bbo": {"tolerance_probb": 0.9}},  # bbo typo
+        {"batch": {"batch_sizee": 8}},  # batch typo
     ],
 )
 def test_unknown_config_keys_are_rejected(cfg):
@@ -194,6 +213,80 @@ def test_bbo_mode_requires_exploration_axes():
 
     with pytest.raises(ValueError, match="no exploration axes configured"):
         run_bbo_mode(_StubMGA(), {"tolerance_prob": 0.9})
+
+
+def test_batch_mode_requires_exploration_axes():
+    pytest.importorskip("pyoNearOpt")
+    # batch_ORACLE imports pypop7 unconditionally at module level.
+    pytest.importorskip("pypop7")
+
+    class _StubMGA:
+        design_axes = []  # no axes configured
+
+    with pytest.raises(ValueError, match="no exploration axes configured"):
+        run_batch_mode(_StubMGA(), {"tolerance_prob": 0.9})
+
+
+# ------------------------------------------------------- solve_direction / support_function
+
+
+def test_solve_direction_builds_objective_solves_and_reports_support_value():
+    calls = {"objective_args": None, "postprocess_label": None}
+
+    class _StubModel:
+        def add_objective(self, obj, sense, overwrite):
+            calls["objective_args"] = (obj, sense, overwrite)
+
+    class _StubMGA:
+        n_z = 2
+        scale = np.array([2.0, 4.0])
+        axes = [SimpleNamespace(name="a"), SimpleNamespace(name="b")]
+        model = _StubModel()
+
+        def axis_expression(self, axis):
+            return {"a": 10.0, "b": 20.0}[axis.name]
+
+        def _solve_and_postprocess(self, label):
+            calls["postprocess_label"] = label
+
+        def current_point_norm(self):
+            return np.array([0.5, 0.25])
+
+    direction = np.array([1.0, -1.0])
+    z_feas, support_value = MGA.solve_direction(_StubMGA(), direction, "iter1_0")
+
+    assert calls["postprocess_label"] == "iter1_0"
+    obj, sense, overwrite = calls["objective_args"]
+    assert sense == "max" and overwrite is True
+    assert obj == pytest.approx(1.0 / 2.0 * 10.0 + (-1.0) / 4.0 * 20.0)
+    assert z_feas.tolist() == [0.5, 0.25]
+    assert support_value == pytest.approx(direction @ z_feas)
+
+
+def test_solve_direction_rejects_wrong_direction_shape():
+    class _StubMGA:
+        n_z = 2
+
+    with pytest.raises(ValueError, match=r"direction shape"):
+        MGA.solve_direction(_StubMGA(), np.array([1.0]), "label")
+
+
+def test_support_function_wraps_solve_direction_with_iter_label():
+    calls = {"labels": []}
+
+    class _StubMGA:
+        _iter_count = 3
+
+        def solve_direction(self, direction, label):
+            calls["labels"].append(label)
+            return np.array([0.1]), 0.42
+
+    stub = _StubMGA()
+    z_feas, support_value = MGA.support_function(stub, np.array([1.0]))
+
+    assert calls["labels"] == ["supf_iter_3"]
+    assert stub._iter_count == 4
+    assert support_value == 0.42
 
 
 # -------------------------------------------------------------- supplied bounds
