@@ -141,6 +141,7 @@ def run_oracle_mode(mga, oracle_cfg):
     finally:
         # Persist artifacts even if the loop raised mid-way (df stays None).
         run_info = {
+            "normalisation": mga.normalisation,
             "formulation": formulation,
             "use_bigM": use_bigM,
             "max_iterations": max_iterations,

@@ -181,6 +181,7 @@ def _run_supf_mode(mga, cfg, mode, exploration):
         # Persist artifacts even if the loop raised mid-way.
         run_info = {
             "mode": mode,
+            "normalisation": mga.normalisation,
             "tolerance_explore": tolerance_explore,
             "n_samples": n_samples,
             "max_iterations": max_iterations,

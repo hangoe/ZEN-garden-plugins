@@ -110,6 +110,37 @@ def test_valid_bbo_config_passes():
     )
 
 
+@pytest.mark.parametrize("mode", ["sampling", "bbo"])
+def test_units_normalisation_accepted_in_sampling_and_bbo_modes(mode):
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": mode,
+            "normalisation": "units",
+            "axes": {"technologies": ["nuclear"], "include_cost": True},
+            mode: {"tolerance_prob": 0.9},
+        }
+    )
+
+
+def test_units_normalisation_rejected_in_oracle_mode():
+    with pytest.raises(ValueError, match="normalisation='units'"):
+        validate_config(
+            {
+                "epsilon": 0.1,
+                "mode": "oracle",
+                "normalisation": "units",
+                "axes": {"technologies": ["nuclear"], "include_cost": True},
+                "oracle": {"tolerance": 0.1},
+            }
+        )
+
+
+def test_unknown_normalisation_value_is_rejected():
+    with pytest.raises(ValueError, match="Unknown MGA normalisation"):
+        validate_config({"mode": "sampling", "normalisation": "absolute"})
+
+
 @pytest.mark.parametrize(
     "cfg",
     [
@@ -223,6 +254,16 @@ def test_norm_phys_round_trip():
     assert np.allclose(
         phys_to_norm(norm_to_phys(norm, scale, offset), scale, offset), norm
     )
+
+
+def test_units_normalisation_scale_offset_is_identity():
+    # normalisation="units" sets scale=1, offset=0 for design axes, so
+    # normalised and physical coordinates coincide.
+    scale = np.ones(3)
+    offset = np.zeros(3)
+    phys = np.array([[0.0, 12.5, 110.0], [3.0, 0.0, 42.0]])
+    assert np.array_equal(norm_to_phys(phys, scale, offset), phys)
+    assert np.array_equal(phys_to_norm(phys, scale, offset), phys)
 
 
 def test_cost_axis_maps_optimum_to_zero_and_budget_to_one():

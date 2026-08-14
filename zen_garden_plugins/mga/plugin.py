@@ -38,9 +38,12 @@ Glossary
     z*          the baseline design in axis coordinates
     phys        physical units (GW, GWh, MEUR, ...)
     norm        normalised coordinates: phys = norm * scale + offset, per
-                axis. Design axes use scale = upper bound and offset = 0, so
-                they reach 1 at their near-optimal maximum; the cost axis
-                uses scale = epsilon * C* and offset = C*, so 0 is the cost
+                axis. Under normalisation="relative" (default), design axes
+                use scale = upper bound and offset = 0, so they reach 1 at
+                their near-optimal maximum; under "units", scale = 1 and
+                offset = 0, so design axes are reported in their own
+                physical units. Either way the cost axis uses
+                scale = epsilon * C* and offset = C*, so 0 is the cost
                 optimum and 1 the budget.
 
 Every solve is written to disk as a sibling sub-solution of the baseline via
@@ -73,6 +76,7 @@ from .supf_driver import run_bbo_mode, run_sampling_mode
 config = {
     "epsilon": 0.1,
     "mode": "weights",
+    "normalisation": "relative",
     "iterations": [],
     "axes": {},
     "oracle": {},
@@ -83,7 +87,16 @@ config = {
 # Recognised config keys per block; anything else is rejected rather than
 # silently ignored.
 _KNOWN_KEYS = {
-    "plugins.mga": {"epsilon", "mode", "iterations", "axes", "oracle", "sampling", "bbo"},
+    "plugins.mga": {
+        "epsilon",
+        "mode",
+        "normalisation",
+        "iterations",
+        "axes",
+        "oracle",
+        "sampling",
+        "bbo",
+    },
     "plugins.mga.axes": {"technologies", "carrier_imports", "include_cost"},
     "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
     "plugins.mga.oracle.max_min": {
@@ -158,7 +171,7 @@ def normalise_rows(A, b):
 
 
 def validate_config(cfg) -> None:
-    """Reject unknown keys in the plugin config.
+    """Reject unknown keys and invalid values in the plugin config.
 
     Every setting is read with a default, so an unrecognised key would
     otherwise be ignored in silence and the run would proceed on defaults.
@@ -177,6 +190,21 @@ def validate_config(cfg) -> None:
                 f"Unknown MGA config key(s) in {label}: {unknown}. "
                 f"Known keys: {sorted(_KNOWN_KEYS[label])}."
             )
+
+    normalisation = cfg.get("normalisation", "relative")
+    if normalisation not in ("relative", "units"):
+        raise ValueError(
+            f"Unknown MGA normalisation: {normalisation!r}. Expected "
+            f"'relative' or 'units'."
+        )
+    if cfg.get("mode") == "oracle" and normalisation == "units":
+        raise ValueError(
+            "MGA: normalisation='units' is not supported in oracle mode -- "
+            "oracle's max-min MILP relies on big_M/t_max dominating axis "
+            "magnitudes and a cut-validity guard sized for O(1) normalised "
+            "coordinates, both of which assume 'relative' normalisation. "
+            "Use sampling or bbo mode for raw physical units."
+        )
 
 
 class MGA:
@@ -202,6 +230,7 @@ class MGA:
         technologies=None,
         carrier_imports=None,
         include_cost=False,
+        normalisation="relative",
     ):
         """
         Args:
@@ -214,6 +243,10 @@ class MGA:
             technologies: Technology axes (names or {group: [members]} lumps).
             carrier_imports: Carrier-import axes, same format.
             include_cost: Add the total-cost axis (oracle mode only).
+            normalisation: "relative" (default) scales design axes by their
+                near-optimal maximum; "units" reports them in raw physical
+                units. The cost axis is always budget-relative. See
+                solve_axis_bounds().
         """
         if epsilon <= 0:
             raise ValueError(f"MGA epsilon must be positive, got {epsilon!r}")
@@ -271,7 +304,9 @@ class MGA:
             self.flow_import = None
             self._ts_duration = None
 
-        # Normalisation state, set once by solve_axis_bounds().
+        # Normalisation convention used by solve_axis_bounds(); the
+        # scale/offset it computes below are set once and derived from this.
+        self.normalisation = normalisation
         self.bounds_phys = None
         self.scale = None
         self.offset = None
@@ -515,8 +550,13 @@ class MGA:
             ],
             "normalisation": (
                 "physical = normalised * scale + offset, per axis; design "
-                "axes use (upper bound, 0), the cost axis (epsilon * c_star, "
-                "c_star)"
+                "axes use "
+                + (
+                    "(1, 0) -- raw physical units"
+                    if self.normalisation == "units"
+                    else "(upper bound, 0)"
+                )
+                + ", the cost axis always (epsilon * c_star, c_star)"
             ),
         }
 
@@ -562,23 +602,39 @@ class MGA:
             design_index += 1
             if not np.isfinite(hi) or hi <= 0:
                 raise RuntimeError(
-                    f"MGA: upper bound {hi:.6g} of axis {axis.name!r} cannot "
-                    f"serve as a normalisation denominator; remove the axis "
-                    f"or supply a positive bound."
+                    f"MGA: axis {axis.name!r} has non-positive near-optimal "
+                    f"maximum {hi:.6g}; remove the axis or supply a positive "
+                    f"bound."
                 )
             if lo > hi:
                 raise RuntimeError(
                     f"MGA: axis {axis.name!r} has lower bound {lo:.6g} above "
                     f"upper bound {hi:.6g}."
                 )
-            # The axis reaches 1 at its near-optimal maximum.
             bounds.append((lo, hi))
-            scale.append(hi)
-            offset.append(0.0)
+            if self.normalisation == "units":
+                # The axis is reported in its own physical unit.
+                scale.append(1.0)
+                offset.append(0.0)
+            else:
+                # The axis reaches 1 at its near-optimal maximum.
+                scale.append(hi)
+                offset.append(0.0)
 
         self.bounds_phys = np.array(bounds, dtype=float)
         self.scale = np.array(scale, dtype=float)
         self.offset = np.array(offset, dtype=float)
+        if self.normalisation == "units":
+            units = self.optimization_setup.variables.units
+            ureg = self.optimization_setup.energy_system.unit_handling.ureg
+            seen = {axis_physical_unit(axis, units, ureg) for axis in self.design_axes}
+            if len(seen) > 1:
+                logging.warning(
+                    "MGA: normalisation='units' but design axes span "
+                    "multiple physical units (%s); a single tolerance will "
+                    "not be comparable across them.",
+                    sorted(unit for unit in seen if unit),
+                )
         logging.info(
             f"MGA: bounds of {self.n_z} axes ready "
             f"({'supplied' if supplied_bounds else 'VMM LPs'}); normalised "
@@ -979,6 +1035,7 @@ def run_mga(
         technologies=axes_cfg.get("technologies"),
         carrier_imports=axes_cfg.get("carrier_imports"),
         include_cost=bool(axes_cfg.get("include_cost", False)),
+        normalisation=config.get("normalisation", "relative"),
     )
     mga.setup()
 

@@ -73,6 +73,21 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
 ``mode`` (str, default ``"weights"``)
     ``"weights"``, ``"oracle"``, ``"sampling"`` or ``"bbo"``.
 
+``normalisation`` (str, default ``"relative"``, oracle/sampling/bbo modes)
+    ``"relative"`` scales each design axis by its near-optimal maximum, so it
+    reaches 1 there; this is what makes a single scalar tolerance meaningful
+    across axes with different physical units. ``"units"`` instead reports
+    design axes in their own physical units (scale = 1, offset = 0) -- only
+    sensible when the selected axes already share comparable units and
+    magnitudes, which is the user's judgement to make, not the plugin's. The
+    cost axis is always normalised relative to the near-optimality budget
+    regardless of this setting. Oracle mode requires the default
+    ``"relative"``: its max-min MILP relies on ``big_M``/``t_max`` dominating
+    axis magnitudes and a cut-validity guard sized for O(1) normalised
+    coordinates, both of which assume relative normalisation; ``"units"``
+    raises a config error there. This key has no effect in ``"weights"``
+    mode, which never normalises axes.
+
 ``iterations`` (list of dicts, weights mode)
     One ``{"weights": {technology: weight}}`` dict per iteration.
 
@@ -105,7 +120,9 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     * ``max_iterations`` (int, default 200).
     * ``initial_bounds``: same as oracle mode's ``initial_bounds``.
     * ``tolerance_explore`` (float, default 0.1): the support-function gap
-      below which a direction counts as well-approximated.
+      below which a direction counts as well-approximated. Its meaning
+      depends on ``normalisation``: a fraction of each axis's near-optimal
+      range under ``"relative"``, a raw physical-unit gap under ``"units"``.
     * ``n_samples`` (int, default 1000): directions sampled per iteration to
       estimate the confidence interval.
     * ``alpha`` (float, default 0.05): significance level of the interval.
@@ -120,7 +137,8 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
       ``tolerance_explore``, ``n_samples``, ``alpha``, ``method``,
       ``seed_rng``: same as sampling mode's keys of the same name -- they
       configure the shared confidence-interval convergence check, not the
-      direction search itself.
+      direction search itself. ``tolerance_explore``'s meaning likewise
+      depends on the top-level ``normalisation`` setting.
     * ``use_bounding_box`` (bool, default false): probe the axis-aligned
       directions first, before falling back to the black-box search.
     * ``max_function_evaluations`` (int, default 2000): evaluation budget
