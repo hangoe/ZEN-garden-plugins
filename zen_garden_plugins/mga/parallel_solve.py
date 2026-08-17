@@ -10,10 +10,16 @@ once, at pool construction, and are reused for the whole run.
 Exception: with `solver.name == "gurobi"`, workers use `"spawn"` instead,
 since gurobipy has documented fork-safety caveats. That means `mga` has to
 survive a real `pickle` round trip once per spawned worker -- cheaper than
-rebuilding the model from scratch, but `pint.UnitRegistry` and a solved
-`linopy.Model`'s live gurobipy handle aren't picklable as-is, so
-`_patch_unit_handling_for_pickling`/`_patch_linopy_model_for_pickling` teach
-them to drop/rebuild the offending state around the pickle boundary.
+rebuilding the model from scratch, but `pint.UnitRegistry`, a solved
+`linopy.Model`'s live gurobipy handle, and any stray `pint.Quantity` aren't
+picklable across processes as-is. `_patch_unit_handling_for_pickling` and
+`_patch_linopy_model_for_pickling` (below) teach the two classes involved to
+drop/rebuild the offending state around the pickle boundary; `_RegistryBootstrap`
+handles the `Quantity` case. All three run unconditionally at import time
+(not just when the parent constructs the pool) -- a spawned worker
+re-imports this module fresh, as its own process, before unpickling
+`initargs`, so anything that must be in place *before* unpickling `mga` has
+to be applied here at module scope, not from inside `__init__`.
 """
 
 from __future__ import annotations
@@ -104,8 +110,62 @@ def _patch_linopy_model_for_pickling() -> None:
     Model._mga_batch_pickle_patched = True
 
 
-def _worker_init(mga: "MGA") -> None:
-    """ProcessPoolExecutor initializer: stash this worker's MGA copy."""
+def _install_application_registry(folder_path, rounding_decimal_points_units) -> None:
+    """Rebuild ZEN-garden's custom-unit registry and install it as pint's
+    process-global default, so `pint.Quantity.__reduce__` can resolve
+    custom units (e.g. "kilotCO2eq", from `unit_definitions.txt`) when a
+    worker unpickles one.
+
+    `pint.Quantity.__reduce__` never pickles the registry a quantity was
+    built with -- pint's own docstring says so: "Since UnitRegistries are
+    not pickled, upon unpickling the new object is always attached to the
+    application registry." A worker's application registry starts out as
+    pint's stock, definitions-free default, so any custom unit blows up
+    with `UndefinedUnitError` the moment a `Quantity` using it is unpickled.
+    """
+    import pint
+    from zen_garden.preprocess.unit_handling import UnitHandling
+
+    pint.set_application_registry(
+        UnitHandling(folder_path, rounding_decimal_points_units).ureg
+    )
+
+
+class _RegistryBootstrap:
+    """First element of `initargs`: a pickle sentinel, not real payload.
+
+    Tuple elements unpickle strictly in order, so putting this first in
+    `initargs=(_RegistryBootstrap(...), mga)` guarantees
+    `_install_application_registry` runs -- as a side effect of
+    reconstructing *this* element -- before pickle ever reaches a
+    `pint.Quantity` nested inside `mga`. `__reduce__` is pickle's hook for
+    "call this function with these args to rebuild me"; here the "rebuild"
+    is pure side effect, and the sentinel itself is discarded.
+    """
+
+    def __init__(self, folder_path, rounding_decimal_points_units):
+        self._args = (folder_path, rounding_decimal_points_units)
+
+    def __reduce__(self):
+        return (_install_application_registry, self._args)
+
+
+# Applied at import time, not lazily inside ForkedBatchSupportFunction.__init__:
+# a spawned worker re-imports this module (to resolve _worker_init/_solve_one)
+# *before* unpickling initargs, so these must already be in effect by then.
+_patch_unit_handling_for_pickling()
+_patch_linopy_model_for_pickling()
+
+
+def _worker_init(_registry_bootstrap: None, mga: "MGA") -> None:
+    """ProcessPoolExecutor initializer: stash this worker's MGA copy.
+
+    `_registry_bootstrap` unpickles to plain `None` -- `_RegistryBootstrap.
+    __reduce__` reconstructs this argument by *calling*
+    `_install_application_registry`, whose return value (implicitly `None`)
+    is what actually lands here. Its job (see `_RegistryBootstrap`) was the
+    side effect during unpickling, not this value.
+    """
     global _MGA
     _MGA = mga
 
@@ -133,20 +193,21 @@ class ForkedBatchSupportFunction:
     def __init__(self, mga: "MGA", n_workers: int):
         solver_name = mga.optimization_setup.solver.name
         start_method = "spawn" if solver_name == "gurobi" else "fork"
-        if start_method == "spawn":
-            _patch_unit_handling_for_pickling()
-            _patch_linopy_model_for_pickling()
         mp_context = multiprocessing.get_context(start_method)
         logging.info(
             f"MGA batch mode: solver is {solver_name!r}, using {start_method!r} "
             f"worker start method, {n_workers} workers."
         )
 
+        unit_handling = mga.optimization_setup.energy_system.unit_handling
+        registry_bootstrap = _RegistryBootstrap(
+            unit_handling.folder_path, unit_handling.rounding_decimal_points_units
+        )
         self._executor = ProcessPoolExecutor(
             max_workers=n_workers,
             mp_context=mp_context,
             initializer=_worker_init,
-            initargs=(mga,),
+            initargs=(registry_bootstrap, mga),
         )
         self._batch_idx = 0
 
