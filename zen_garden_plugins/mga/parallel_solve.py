@@ -8,9 +8,12 @@ worker just inherits the parent's memory via `os.fork()`. Workers start
 once, at pool construction, and are reused for the whole run.
 
 Exception: with `solver.name == "gurobi"`, workers use `"spawn"` instead,
-since gurobipy has documented fork-safety caveats. `linopy.Model` is plain
-default-picklable, so a spawned worker's one-time pickle at startup is
-still far cheaper than rebuilding the model from scratch.
+since gurobipy has documented fork-safety caveats. That means `mga` has to
+survive a real `pickle` round trip once per spawned worker -- cheaper than
+rebuilding the model from scratch, but `pint.UnitRegistry` and a solved
+`linopy.Model`'s live gurobipy handle aren't picklable as-is, so
+`_patch_unit_handling_for_pickling`/`_patch_linopy_model_for_pickling` teach
+them to drop/rebuild the offending state around the pickle boundary.
 """
 
 from __future__ import annotations
@@ -65,6 +68,42 @@ def _patch_unit_handling_for_pickling() -> None:
     UnitHandling._mga_batch_pickle_patched = True
 
 
+def _patch_linopy_model_for_pickling() -> None:
+    """Drop the live solver handle before pickling `mga` for a spawned worker.
+
+    After `optimization_setup.solve()`, `linopy.Model.solver_model` holds the
+    live gurobipy `Model` -- a thin Python wrapper around a C pointer
+    (`PyCapsule`), which cannot be serialized (or meaningfully handed to a
+    different process; a Gurobi model/env is tied to the process that
+    created it). `Model` is a `__slots__` class with no `__dict__`, so this
+    needs its own `__getstate__`/`__setstate__` rather than a dict patch.
+
+    Each worker's first `solve_direction()` call runs `optimization_setup
+    .solve()`, which resets `solver_model = None` before building its own
+    fresh solver connection -- so dropping it here (rather than rebuilding
+    it, as with `ureg`) is enough; nothing reads it before that first solve.
+    """
+    from linopy.model import Model
+
+    if getattr(Model, "_mga_batch_pickle_patched", False):
+        return
+
+    def __getstate__(self):
+        state = {
+            slot: getattr(self, slot) for slot in Model.__slots__ if hasattr(self, slot)
+        }
+        state["solver_model"] = None
+        return state
+
+    def __setstate__(self, state):
+        for slot, value in state.items():
+            setattr(self, slot, value)
+
+    Model.__getstate__ = __getstate__
+    Model.__setstate__ = __setstate__
+    Model._mga_batch_pickle_patched = True
+
+
 def _worker_init(mga: "MGA") -> None:
     """ProcessPoolExecutor initializer: stash this worker's MGA copy."""
     global _MGA
@@ -96,6 +135,7 @@ class ForkedBatchSupportFunction:
         start_method = "spawn" if solver_name == "gurobi" else "fork"
         if start_method == "spawn":
             _patch_unit_handling_for_pickling()
+            _patch_linopy_model_for_pickling()
         mp_context = multiprocessing.get_context(start_method)
         logging.info(
             f"MGA batch mode: solver is {solver_name!r}, using {start_method!r} "
