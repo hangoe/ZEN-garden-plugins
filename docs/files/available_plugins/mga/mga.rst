@@ -103,7 +103,13 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
 ``normalisation`` (str, default ``"relative"``, oracle/sampling/bbo/batch modes)
     ``"relative"`` scales each design axis by its near-optimal maximum, so it
     reaches 1 there; this is what makes a single scalar tolerance meaningful
-    across axes with different physical units. ``"units"`` instead reports
+    across axes with different physical units. ``"minmax"`` instead maps
+    each design axis's own near-optimal ``[min, max]`` onto ``[0, 1]``
+    (scale = upper - lower, offset = lower) -- unlike ``"relative"``, this
+    uses the full ``[0, 1]`` range even when an axis's near-optimal minimum
+    sits well above 0, so a fixed exploration tolerance represents the same
+    fraction of *that axis's own* near-optimal spread for every axis, not
+    just of its distance from the origin. ``"units"`` instead reports
     design axes in their own physical units (scale = 1, offset = 0) -- only
     sensible when the selected axes already share comparable units and
     magnitudes, which is the user's judgement to make, not the plugin's. The
@@ -111,9 +117,9 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     regardless of this setting. Oracle mode requires the default
     ``"relative"``: its max-min MILP relies on ``big_M``/``t_max`` dominating
     axis magnitudes and a cut-validity guard sized for O(1) normalised
-    coordinates, both of which assume relative normalisation; ``"units"``
-    raises a config error there. This key has no effect in ``"weights"``
-    mode, which never normalises axes.
+    coordinates anchored at offset=0, both of which assume relative
+    normalisation; ``"units"``/``"minmax"`` raise a config error there. This
+    key has no effect in ``"weights"`` mode, which never normalises axes.
 
 ``iterations`` (list of dicts, weights mode)
     One ``{"weights": {technology: weight}}`` dict per iteration.

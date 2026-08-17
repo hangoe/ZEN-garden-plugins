@@ -46,11 +46,13 @@ Glossary
     norm        normalised coordinates: phys = norm * scale + offset, per
                 axis. Under normalisation="relative" (default), design axes
                 use scale = upper bound and offset = 0, so they reach 1 at
-                their near-optimal maximum; under "units", scale = 1 and
-                offset = 0, so design axes are reported in their own
-                physical units. Either way the cost axis uses
-                scale = epsilon * C* and offset = C*, so 0 is the cost
-                optimum and 1 the budget.
+                their near-optimal maximum; under "minmax", scale = upper -
+                lower bound and offset = lower bound, so each axis spans
+                exactly [0, 1] between its own near-optimal min and max;
+                under "units", scale = 1 and offset = 0, so design axes are
+                reported in their own physical units. Either way the cost
+                axis uses scale = epsilon * C* and offset = C*, so 0 is the
+                cost optimum and 1 the budget.
 
 Every solve is written to disk as a sibling sub-solution of the baseline via
 Postprocess.
@@ -220,18 +222,19 @@ def validate_config(cfg) -> None:
             )
 
     normalisation = cfg.get("normalisation", "relative")
-    if normalisation not in ("relative", "units"):
+    if normalisation not in ("relative", "minmax", "units"):
         raise ValueError(
             f"Unknown MGA normalisation: {normalisation!r}. Expected "
-            f"'relative' or 'units'."
+            f"'relative', 'minmax' or 'units'."
         )
-    if cfg.get("mode") == "oracle" and normalisation == "units":
+    if cfg.get("mode") == "oracle" and normalisation in ("units", "minmax"):
         raise ValueError(
-            "MGA: normalisation='units' is not supported in oracle mode -- "
-            "oracle's max-min MILP relies on big_M/t_max dominating axis "
-            "magnitudes and a cut-validity guard sized for O(1) normalised "
-            "coordinates, both of which assume 'relative' normalisation. "
-            "Use sampling or bbo mode for raw physical units."
+            f"MGA: normalisation={normalisation!r} is not supported in "
+            "oracle mode -- oracle's max-min MILP relies on big_M/t_max "
+            "dominating axis magnitudes and a cut-validity guard sized for "
+            "O(1) normalised coordinates anchored at offset=0, both of "
+            "which assume 'relative' normalisation. Use sampling or bbo "
+            "mode for 'units'/'minmax'."
         )
 
 
@@ -272,9 +275,10 @@ class MGA:
             carrier_imports: Carrier-import axes, same format.
             include_cost: Add the total-cost axis (oracle mode only).
             normalisation: "relative" (default) scales design axes by their
-                near-optimal maximum; "units" reports them in raw physical
-                units. The cost axis is always budget-relative. See
-                solve_axis_bounds().
+                near-optimal maximum; "minmax" maps each axis's own
+                near-optimal [min, max] onto [0, 1]; "units" reports them in
+                raw physical units. The cost axis is always budget-relative.
+                See solve_axis_bounds().
         """
         if epsilon <= 0:
             raise ValueError(f"MGA epsilon must be positive, got {epsilon!r}")
@@ -582,6 +586,9 @@ class MGA:
                 + (
                     "(1, 0) -- raw physical units"
                     if self.normalisation == "units"
+                    else "(upper bound - lower bound, lower bound) -- "
+                    "near-optimal [min, max] mapped to [0, 1]"
+                    if self.normalisation == "minmax"
                     else "(upper bound, 0)"
                 )
                 + ", the cost axis always (epsilon * c_star, c_star)"
@@ -644,6 +651,22 @@ class MGA:
                 # The axis is reported in its own physical unit.
                 scale.append(1.0)
                 offset.append(0.0)
+            elif self.normalisation == "minmax":
+                # The axis spans exactly [0, 1] between its own near-optimal
+                # min and max, so a fixed exploration tolerance means the
+                # same fraction of *this axis's* range for every axis --
+                # unlike "relative", which wastes [0, lo/hi) whenever an
+                # axis's near-optimal minimum sits well above 0.
+                span = hi - lo
+                if span <= 0:
+                    raise RuntimeError(
+                        f"MGA: axis {axis.name!r} has zero near-optimal "
+                        f"range (lower={lo:.6g} == upper={hi:.6g}); "
+                        f"normalisation='minmax' requires a positive span. "
+                        f"Remove the axis or use 'relative'/'units'."
+                    )
+                scale.append(span)
+                offset.append(lo)
             else:
                 # The axis reaches 1 at its near-optimal maximum.
                 scale.append(hi)

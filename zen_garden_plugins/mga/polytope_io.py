@@ -43,10 +43,12 @@ Schema:
     run_json        () str               how the run was configured and ended
 
 Normalisation is affine and per axis: physical = normalised * scale + offset.
-Two conventions exist, selected per run by `plugins.mga.normalisation`:
+Three conventions exist, selected per run by `plugins.mga.normalisation`:
 "relative" (default) uses scale = upper bound, offset = 0 for design axes, so
-each reaches 1 at its near-optimal maximum; "units" uses scale = 1, offset =
-0, so design axes are reported in their own physical units. Both conventions
+each reaches 1 at its near-optimal maximum; "minmax" uses scale = upper -
+lower bound, offset = lower bound, so each design axis spans exactly [0, 1]
+between its own near-optimal min and max; "units" uses scale = 1, offset =
+0, so design axes are reported in their own physical units. All conventions
 normalise the cost axis identically: scale = epsilon * c_star, offset =
 c_star, so 0 is the cost optimum and 1 the near-optimality budget. Which
 convention produced a given file is recorded in run_json. scale/offset are

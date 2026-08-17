@@ -154,6 +154,32 @@ def test_units_normalisation_rejected_in_oracle_mode():
         )
 
 
+@pytest.mark.parametrize("mode", ["sampling", "bbo", "batch"])
+def test_minmax_normalisation_accepted_outside_oracle_mode(mode):
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": mode,
+            "normalisation": "minmax",
+            "axes": {"technologies": ["nuclear"], "include_cost": True},
+            mode: {"tolerance_prob": 0.9},
+        }
+    )
+
+
+def test_minmax_normalisation_rejected_in_oracle_mode():
+    with pytest.raises(ValueError, match="normalisation='minmax'"):
+        validate_config(
+            {
+                "epsilon": 0.1,
+                "mode": "oracle",
+                "normalisation": "minmax",
+                "axes": {"technologies": ["nuclear"], "include_cost": True},
+                "oracle": {"tolerance": 0.1},
+            }
+        )
+
+
 def test_unknown_normalisation_value_is_rejected():
     with pytest.raises(ValueError, match="Unknown MGA normalisation"):
         validate_config({"mode": "sampling", "normalisation": "absolute"})
@@ -357,6 +383,18 @@ def test_units_normalisation_scale_offset_is_identity():
     phys = np.array([[0.0, 12.5, 110.0], [3.0, 0.0, 42.0]])
     assert np.array_equal(norm_to_phys(phys, scale, offset), phys)
     assert np.array_equal(phys_to_norm(phys, scale, offset), phys)
+
+
+def test_minmax_normalisation_maps_near_optimal_range_to_unit_interval():
+    # normalisation="minmax" sets scale=upper-lower, offset=lower for design
+    # axes, so the near-optimal minimum maps to 0 and the maximum to 1 --
+    # unlike "relative", this holds even when the minimum is well above 0.
+    lower = np.array([50.0, 0.0])
+    upper = np.array([150.0, 20.0])
+    scale, offset = upper - lower, lower
+    assert np.allclose(phys_to_norm(np.array([lower, upper]), scale, offset), [[0.0, 0.0], [1.0, 1.0]])
+    midpoint = lower + 0.5 * (upper - lower)
+    assert np.allclose(phys_to_norm(midpoint, scale, offset), [0.5, 0.5])
 
 
 def test_cost_axis_maps_optimum_to_zero_and_budget_to_one():
