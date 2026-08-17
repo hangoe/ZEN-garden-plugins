@@ -29,6 +29,42 @@ if TYPE_CHECKING:
 _MGA: "MGA | None" = None
 
 
+def _patch_unit_handling_for_pickling() -> None:
+    """Make `mga` (and thus `initargs`) survive `spawn`'s pickling.
+
+    `optimization_setup.energy_system.unit_handling.ureg` is a plain
+    `pint.UnitRegistry()`. pint's built-in conversion contexts (e.g.
+    "spectroscopy", "boltzmann") each store a `Relation.transformation`
+    closure -- a locally-defined lambda -- in `Context.funcs`, so *any*
+    `UnitRegistry()` instance is unpicklable out of the box (reproduces with
+    a bare `pickle.dumps(pint.UnitRegistry())`). `ureg` is reachable from
+    `mga` via `optimization_setup`, so it breaks pickling `initargs=(mga,)`
+    for spawned workers.
+
+    `UnitHandling.get_base_units()` deterministically rebuilds `ureg` (plus
+    `base_units`/`dim_matrix`) from `self.folder_path` alone, so it's safe to
+    drop `ureg` before pickling and rebuild it after unpickling in each
+    worker, rather than trying to transmit the pint registry itself.
+    """
+    from zen_garden.preprocess.unit_handling import UnitHandling
+
+    if getattr(UnitHandling, "_mga_batch_pickle_patched", False):
+        return
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["ureg"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.get_base_units()
+
+    UnitHandling.__getstate__ = __getstate__
+    UnitHandling.__setstate__ = __setstate__
+    UnitHandling._mga_batch_pickle_patched = True
+
+
 def _worker_init(mga: "MGA") -> None:
     """ProcessPoolExecutor initializer: stash this worker's MGA copy."""
     global _MGA
@@ -58,6 +94,8 @@ class ForkedBatchSupportFunction:
     def __init__(self, mga: "MGA", n_workers: int):
         solver_name = mga.optimization_setup.solver.name
         start_method = "spawn" if solver_name == "gurobi" else "fork"
+        if start_method == "spawn":
+            _patch_unit_handling_for_pickling()
         mp_context = multiprocessing.get_context(start_method)
         logging.info(
             f"MGA batch mode: solver is {solver_name!r}, using {start_method!r} "
