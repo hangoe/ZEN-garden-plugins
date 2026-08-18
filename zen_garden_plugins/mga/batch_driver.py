@@ -14,6 +14,26 @@ pyoNearOpt is imported lazily, as in oracle_driver.py/supf_driver.py. Batch
 mode always needs pyoNearOpt's optional `bbo` extra (pulls in `pypop7`),
 even with `strategy_mode="sampling"`: `batch_ORACLE` imports `SHADE`
 unconditionally at module level.
+
+Each saved diagnostics.csv row also carries its own "wall_time_seconds":
+the real elapsed time of that outer iteration's whole batch_size-worker
+round, timed directly around the concurrent submit/gather in
+ForkedBatchSupportFunction.__call__ (see parallel_solve.py) -- the same
+idea as near_optimal_tools' own docs/examples/method_comparison.ipynb
+wrapping its (sequential) support_function in a TimedCallback, adapted here
+for a *concurrent* callback. This is deliberately NOT derived from
+ZEN-garden's own per-solve benchmarking.json: that only records each
+worker's own LP/MILP time (missing model-construction/I/O overhead, and
+per-worker rather than per-batch-round, so batch_size of them can't be
+combined into a real elapsed time without guessing how much they actually
+overlapped), and -- found the hard way, analysing an earlier batch run --
+a range of a run's own per-point benchmarking.json files can go missing
+independently of whether the underlying solve succeeded, if whatever
+copies the run's outputs off Euler gets interrupted (see
+plot_mga_results.py's REAL_ELAPSED_SECONDS/_calibrate_cum_seconds for the
+external-SLURM-history workaround that earlier run needed). Living in
+diagnostics.csv instead means it's saved once, atomically, with the rest
+of the run's own artifacts.
 """
 
 import logging
@@ -94,6 +114,19 @@ def run_batch_mode(mga, cfg):
     final_gap = float("nan")
     try:
         _, iteration_history = explorer.explore(max_iterations)
+        # batch_oracle.explore calls batch_support_function exactly once per
+        # iteration_history entry it appends, in the same order (both happen
+        # in the same loop body, uninterrupted by any other call) -- so
+        # ForkedBatchSupportFunction.times zips onto iteration_history 1:1.
+        # A length mismatch would mean that invariant broke upstream; fail
+        # loud here rather than silently truncate/misalign timings.
+        assert len(iteration_history) == len(batch_support_function.times), (
+            f"MGA batch: {len(iteration_history)} iteration_history entries "
+            f"but {len(batch_support_function.times)} recorded batch call "
+            f"times; these should always match 1:1."
+        )
+        for entry, elapsed in zip(iteration_history, batch_support_function.times):
+            entry["wall_time_seconds"] = elapsed
         # batch_oracle has no public re-check; read its own last recorded
         # history entry instead (same staleness caveat as sampling/bbo's
         # pre-refactor check).

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import time
 from concurrent.futures import ProcessPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -170,6 +171,14 @@ def _worker_init(_registry_bootstrap: None, mga: "MGA") -> None:
     _MGA = mga
 
 
+def _warmup_task() -> None:
+    """No-op submitted once per worker at pool construction, purely to force
+    `ProcessPoolExecutor` to spawn (and, under `"spawn"`, unpickle `initargs`
+    into) every worker up front -- see `ForkedBatchSupportFunction.__init__`.
+    """
+    return None
+
+
 def _solve_one(batch_idx: int, job_idx: int, direction: np.ndarray):
     """Task submitted to the pool: solve one direction, tag it with its
     position in the batch so results can be re-sorted after gathering."""
@@ -209,11 +218,47 @@ class ForkedBatchSupportFunction:
             initializer=_worker_init,
             initargs=(registry_bootstrap, mga),
         )
+        # ProcessPoolExecutor spawns workers lazily, from submit() -- not at
+        # construction -- so without this, the FIRST __call__ below would pay
+        # for spawning every worker and (under "spawn") unpickling `mga` into
+        # each one, silently inflating that round's recorded wall-clock time
+        # relative to every later round. Forcing that one-time cost here,
+        # before any timed call, keeps self.times comparable across rounds.
+        warmup_start = time.perf_counter()
+        warmup_futures = [self._executor.submit(_warmup_task) for _ in range(n_workers)]
+        for future in warmup_futures:
+            future.result()
+        logging.info(
+            f"MGA batch mode: worker pool warmed up in "
+            f"{time.perf_counter() - warmup_start:.1f}s."
+        )
         self._batch_idx = 0
+        # Real elapsed wall-clock time per __call__ (i.e. per outer batch
+        # iteration), measured directly around the concurrent submit/gather
+        # below -- unlike ZEN-garden's own per-solve benchmarking.json
+        # (each worker's OWN LP/MILP time only, missing model-construction/
+        # I/O overhead, and per-worker rather than per-batch-round so it
+        # can't be summed into a real elapsed time without guessing how much
+        # the batch_size workers actually overlapped), this is the genuine
+        # duration of "how long did this whole round of batch_size
+        # concurrent solves take", the same quantity near_optimal_tools' own
+        # docs/examples/method_comparison.ipynb gets from wrapping its
+        # (sequential) support_function in a TimedCallback. batch_driver.py
+        # zips this 1:1 onto iteration_history (batch_oracle.explore calls
+        # this callback exactly once per iteration_history entry, in the
+        # same order) as a "wall_time_seconds" diagnostics.csv column, so
+        # it's saved once, atomically, with the rest of the run's own
+        # artifacts -- not scattered across batch_size x n_iterations
+        # separate benchmarking.json files whose write/download can fail
+        # independently of whether the underlying solve succeeded (see
+        # plot_mga_results.py's REAL_ELAPSED_SECONDS/_calibrate_cum_seconds
+        # for the workaround this was needed for on runs before this fix).
+        self.times: list[float] = []
 
     def __call__(self, directions: np.ndarray):
         """The `batch_support_function` callback `batch_oracle` calls once
         per iteration with `directions` of shape (k, n_explore)."""
+        start = time.perf_counter()
         self._batch_idx += 1
         futures = [
             self._executor.submit(_solve_one, self._batch_idx, job_idx, direction)
@@ -222,6 +267,7 @@ class ForkedBatchSupportFunction:
         # future.result() re-raises a worker's exception here, aborting the
         # whole batch -- matches batch_oracle's all-or-nothing contract.
         results = [future.result() for future in futures]
+        self.times.append(time.perf_counter() - start)
         results.sort(key=lambda r: r[0])
         points = np.vstack([z_feas for _, z_feas, _ in results])
         support_values = np.array([value for _, _, value in results], dtype=float)

@@ -28,6 +28,17 @@ The solver is hardcoded to Gurobi: the max-min models need SOS1 constraints
 (kkt_milp without big-M) or global nonconvex QP solving (dual_bilinear), and
 the certificate reads Gurobi's dual bound directly.
 
+Unlike supf_driver.py/batch_driver.py (whose "wall_time_seconds" column
+needed adding this project's own timer around their callback, see
+supf_driver.py's module docstring), oracle needs no such change here:
+pyoNearOpt's own ORACLE.refine_approximations already times itself, every
+iteration, with plain time.time() -- "iteration_time" (the whole iteration:
+the max-min solve via calculate_outer_inner_distance + find_nearest_point +
+bookkeeping), "max_min_solve_time", and "feas_point_time" all land in `df`
+untouched and are saved into diagnostics.csv as-is below. "iteration_time"
+is oracle's real-wall-clock-per-iteration column, playing the same role
+"wall_time_seconds" now plays for the other two modes.
+
 pyoNearOpt compatibility: the base (published) package provides only the
 default "kkt_milp" formulation. "dual_bilinear" would need a pyoNearOpt that
 includes this formulation. Here only Md (big-M vs SOS1) is forwarded to

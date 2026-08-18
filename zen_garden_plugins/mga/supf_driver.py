@@ -34,15 +34,44 @@ pyoNearOpt is imported lazily so that "weights" mode works without it
 installed, exactly as oracle_driver.py does. `bbo` mode additionally needs
 pyoNearOpt's optional `bbo` extra (`pip install "pyoNearOpt[bbo]"`, which
 pulls in `pypop7`).
+
+Each saved diagnostics.csv row also carries its own "wall_time_seconds": the
+real elapsed time of that iteration's own support_function call, timed by
+wrapping it in `_TimedCallback` below before handing it to `supf_explore` --
+the same idea as near_optimal_tools' own docs/examples/
+method_comparison.ipynb wrapping its callback in a TimedCallback (see
+batch_driver.py's module docstring for the concurrent-callback version of
+this, and why it's deliberately not derived from ZEN-garden's own
+benchmarking.json).
 """
 
 import importlib.metadata
 import logging
+import time
 from pathlib import Path
 
 import pandas as pd
 
 from .polytope_io import Polytope, save_polytope
+
+
+class _TimedCallback:
+    """Wraps a single-direction callback (mga.support_function) to record
+    each call's own real elapsed wall-clock time -- see the module
+    docstring. `supf_explore.explore` calls `support_function` exactly once
+    per iteration_history entry it appends, in the same order (both happen
+    in the same loop body, uninterrupted by any other call), so `times`
+    zips onto iteration_history 1:1 once the loop finishes."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.times: list[float] = []
+
+    def __call__(self, *args, **kwargs):
+        start = time.perf_counter()
+        result = self.callback(*args, **kwargs)
+        self.times.append(time.perf_counter() - start)
+        return result
 
 
 def run_sampling_mode(mga, cfg):
@@ -148,8 +177,9 @@ def _run_supf_mode(mga, cfg, mode, exploration):
         seed_rng=seed_rng,
         print_lv=1,
     )
+    timed_support_function = _TimedCallback(mga.support_function)
     explorer = supf_explore(
-        support_function=mga.support_function,
+        support_function=timed_support_function,
         poly_approx=poly,
         exploration=exploration,
         metric=metric,
@@ -175,6 +205,16 @@ def _run_supf_mode(mga, cfg, mode, exploration):
     final_gap = float("nan")
     try:
         _, iteration_history = explorer.explore(max_iterations)
+        # See _TimedCallback's docstring for why this always matches 1:1;
+        # fail loud here rather than silently truncate/misalign timings if
+        # that invariant ever breaks upstream.
+        assert len(iteration_history) == len(timed_support_function.times), (
+            f"MGA {mode}: {len(iteration_history)} iteration_history entries "
+            f"but {len(timed_support_function.times)} recorded support_function "
+            f"call times; these should always match 1:1."
+        )
+        for entry, elapsed in zip(iteration_history, timed_support_function.times):
+            entry["wall_time_seconds"] = elapsed
         # supf_explore checks `metric` at the *start* of every iteration,
         # before that iteration's point/cut are added to `poly`; so its last
         # recorded check does not reflect the final query when the loop runs
