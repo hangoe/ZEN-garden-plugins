@@ -26,6 +26,7 @@ from zen_garden_plugins.mga.polytope_io import (
     CARRIER_IMPORT,
     NODE_CAPEX,
     NODE_CAPEX_PERIOD,
+    NODE_CAPEX_TECH,
     TECH_CAPACITY,
     TOTAL_COST,
     Polytope,
@@ -45,22 +46,27 @@ NODES = ["DE", "CH", "FR", "BE", "NL", "LU"]
 
 
 def test_singleton_and_lumped_axes_keep_user_order():
-    tech_groups, carrier_groups, node_capex_groups, node_capex_period_axes = (
-        build_axis_groups(
-            ["nuclear", {"hydro": ["hydro_a", "hydro_b"]}],
-            ["biomass"],
-            TECHS,
-            CARRIERS,
-        )
+    (
+        tech_groups,
+        carrier_groups,
+        node_capex_groups,
+        node_capex_period_axes,
+        node_capex_tech_axes,
+    ) = build_axis_groups(
+        ["nuclear", {"hydro": ["hydro_a", "hydro_b"]}],
+        ["biomass"],
+        TECHS,
+        CARRIERS,
     )
     assert tech_groups == [("nuclear", ["nuclear"]), ("hydro", ["hydro_a", "hydro_b"])]
     assert carrier_groups == [("biomass", ["biomass"])]
     assert node_capex_groups == []
     assert node_capex_period_axes == []
+    assert node_capex_tech_axes == []
 
 
 def test_empty_config_yields_no_axes():
-    assert build_axis_groups(None, None, TECHS, CARRIERS) == ([], [], [], [])
+    assert build_axis_groups(None, None, TECHS, CARRIERS) == ([], [], [], [], [])
 
 
 @pytest.mark.parametrize(
@@ -92,7 +98,7 @@ def test_axis_name_cannot_be_used_twice_across_blocks():
 
 
 def test_singleton_and_lumped_node_capex_axes_keep_user_order():
-    _, _, node_capex_groups, _ = build_axis_groups(
+    _, _, node_capex_groups, _, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -136,7 +142,7 @@ def test_node_capex_axis_name_cannot_collide_with_tech_or_carrier_axis():
 
 
 def test_node_capex_periods_produce_nodes_major_periods_minor_axes():
-    _, _, _, node_capex_period_axes = build_axis_groups(
+    _, _, _, node_capex_period_axes, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -174,6 +180,73 @@ def test_invalid_node_capex_periods_are_rejected(node_capex_periods):
             TECHS,
             CARRIERS,
             node_capex_periods=node_capex_periods,
+            all_nodes=NODES,
+        )
+
+
+# ------------------------------------------------ node capex by technology
+
+
+def test_node_capex_by_technology_produces_nodes_major_tech_groups_minor_axes():
+    _, _, _, _, node_capex_tech_axes = build_axis_groups(
+        None,
+        None,
+        TECHS,
+        CARRIERS,
+        node_capex_by_technology={
+            "nodes": ["DE", {"benelux": ["BE", "NL", "LU"]}],
+            "technology_groups": [
+                {"renewables": ["pv", "hydro_a", "hydro_b"]},
+                "nuclear",
+            ],
+        },
+        all_nodes=NODES,
+    )
+    assert node_capex_tech_axes == [
+        ("DE_renewables", ["DE"], ["pv", "hydro_a", "hydro_b"]),
+        ("DE_nuclear", ["DE"], ["nuclear"]),
+        ("benelux_renewables", ["BE", "NL", "LU"], ["pv", "hydro_a", "hydro_b"]),
+        ("benelux_nuclear", ["BE", "NL", "LU"], ["nuclear"]),
+    ]
+
+
+@pytest.mark.parametrize(
+    "node_capex_by_technology",
+    [
+        {"nodes": ["DE"]},  # nodes without technology_groups
+        {"technology_groups": [{"renewables": ["pv"]}]},  # groups without nodes
+        {"nodes": ["DE"], "technology_groups": [{"g": ["typo"]}]},  # unknown tech
+        {"nodes": ["typo"], "technology_groups": [{"g": ["pv"]}]},  # unknown node
+        {"nodes": ["DE"], "technology_groups": [{"DE": ["pv"]}]},  # shadows a node
+        {"nodes": ["DE"], "technology_groups": [{"g": []}]},  # empty member list
+    ],
+)
+def test_invalid_node_capex_by_technology_configs_are_rejected(
+    node_capex_by_technology,
+):
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_capex_by_technology=node_capex_by_technology,
+            all_nodes=NODES,
+        )
+
+
+def test_node_capex_by_technology_axis_name_cannot_collide_with_node_capex_axis():
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_capex=[{"DE_renewables": ["DE"]}],
+            node_capex_by_technology={
+                "nodes": ["DE"],
+                "technology_groups": [{"renewables": ["pv"]}],
+            },
             all_nodes=NODES,
         )
 
@@ -238,6 +311,49 @@ def test_node_capex_period_axis_restricts_to_the_axis_year_indices():
     assert float(value.sum(skipna=True)) == pytest.approx(30.0)  # 10+20
 
 
+def _capex_data_array_multi_tech():
+    """A cost_capex_yearly-shaped DataArray with two real technologies
+    ("nuclear", "pv") both valid at the same node "DE", for testing that a
+    NODE_CAPEX_TECH axis's technology restriction actually excludes the
+    other technology's capex at that same node (unlike NODE_CAPEX, which
+    sums every technology)."""
+    coords = {
+        "set_technologies": ["nuclear", "pv"],
+        "set_capacity_types": ["power"],
+        "set_location": ["DE"],
+        "set_time_steps_yearly": [0, 1, 2],
+    }
+    data = np.empty((2, 1, 1, 3))
+    data[0, 0, 0, :] = [10.0, 20.0, 30.0]  # nuclear @ DE, years 0/1/2
+    data[1, 0, 0, :] = [100.0, 100.0, 100.0]  # pv @ DE, years 0/1/2
+    return xr.DataArray(
+        data,
+        dims=[
+            "set_technologies",
+            "set_capacity_types",
+            "set_location",
+            "set_time_steps_yearly",
+        ],
+        coords=coords,
+    )
+
+
+def test_node_capex_tech_axis_restricts_to_the_axis_technologies():
+    axis = Axis("DE_nuclear", NODE_CAPEX_TECH, ("DE",), None, technologies=("nuclear",))
+    value = MGA._design_axis_terms(
+        _node_capex_stub(), axis, None, None, capex=_capex_data_array_multi_tech()
+    )
+    assert float(value.sum(skipna=True)) == pytest.approx(60.0)  # 10+20+30, pv excluded
+
+
+def test_node_capex_axis_without_technology_restriction_sums_every_technology():
+    axis = Axis("DE", NODE_CAPEX, ("DE",), None)
+    value = MGA._design_axis_terms(
+        _node_capex_stub(), axis, None, None, capex=_capex_data_array_multi_tech()
+    )
+    assert float(value.sum(skipna=True)) == pytest.approx(360.0)  # 60 nuclear + 300 pv
+
+
 def test_year_indices_in_period_is_boundary_inclusive():
     year_indices = [0, 1, 2, 3]
     real_years = [2021, 2025, 2030, 2035]
@@ -275,6 +391,10 @@ def test_valid_node_capex_config_passes():
                 "node_capex_periods": {
                     "nodes": ["DE"],
                     "periods": [[2021, 2030], [2031, 2040]],
+                },
+                "node_capex_by_technology": {
+                    "nodes": ["DE"],
+                    "technology_groups": [{"renewables": ["pv", "wind"]}],
                 },
             },
         }
@@ -388,6 +508,7 @@ def test_unknown_normalisation_value_is_rejected():
         {"bbo": {"tolerance_probb": 0.9}},  # bbo typo
         {"batch": {"batch_sizee": 8}},  # batch typo
         {"axes": {"node_capex_periods": {"preiods": []}}},  # nested typo
+        {"axes": {"node_capex_by_technology": {"technolgy_groups": []}}},  # nested typo
     ],
 )
 def test_unknown_config_keys_are_rejected(cfg):
@@ -701,6 +822,14 @@ CAPEX_UNITS = _units_series(
     ],
     ["megaEuro", "megaEuro"],
 )
+CAPEX_UNITS_MULTI_TECH = _units_series(
+    ["technology", "capacity_type", "location", "year"],
+    [
+        ("nuclear", "power", "DE", 2050),
+        ("pv", "power", "DE", 2050),
+    ],
+    ["megaEuro", "kiloEuro"],
+)
 
 
 def test_tech_axis_unit_follows_the_selected_capacity_type():
@@ -728,6 +857,19 @@ def test_node_capex_period_axis_unit_reads_the_capex_variable_unit():
     axis = Axis("DE_2021_2030", NODE_CAPEX_PERIOD, ("DE",), None, period=(2021, 2030))
     units = {"cost_capex_yearly": CAPEX_UNITS}
     assert axis_physical_unit(axis, units, pint.UnitRegistry()) == "megaEuro"
+
+
+def test_node_capex_tech_axis_unit_is_masked_to_the_selected_technologies():
+    units = {"cost_capex_yearly": CAPEX_UNITS_MULTI_TECH}
+    unfiltered = Axis("DE", NODE_CAPEX, ("DE",), None)
+    nuclear_only = Axis(
+        "DE_nuclear", NODE_CAPEX_TECH, ("DE",), None, technologies=("nuclear",)
+    )
+
+    assert axis_physical_unit(unfiltered, units, pint.UnitRegistry()) == (
+        "kiloEuro + megaEuro"
+    )
+    assert axis_physical_unit(nuclear_only, units, pint.UnitRegistry()) == "megaEuro"
 
 
 def test_cost_axis_reads_the_cost_variable_unit():

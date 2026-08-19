@@ -7,9 +7,9 @@ and therefore registers no event handlers.
 
 Every exploratory variable is an axis -- a technology-capacity group, a
 carrier-import group, a per-node (or per-node-lump) capex group, a per-node
-capex group restricted to an explicit year span, or the total cost -- so all
-per-axis arrays share one length and one order, matching the polytope's
-columns.
+capex group restricted to an explicit year span, a per-node capex group
+restricted to a named technology group, or the total cost -- so all per-axis
+arrays share one length and one order, matching the polytope's columns.
 
 Schema:
 
@@ -19,7 +19,7 @@ Schema:
     name_list       (n_axes,) str        axis names, in column order
     kinds           (n_axes,) str        tech_capacity | carrier_import |
                                          node_capex | node_capex_period |
-                                         total_cost
+                                         node_capex_tech | total_cost
     units           (n_axes,) str        physical unit, "" when unknown
     scale           (n_axes,)            physical = normalised * scale + offset
     offset          (n_axes,)
@@ -71,6 +71,7 @@ TECH_CAPACITY = "tech_capacity"
 CARRIER_IMPORT = "carrier_import"
 NODE_CAPEX = "node_capex"
 NODE_CAPEX_PERIOD = "node_capex_period"
+NODE_CAPEX_TECH = "node_capex_tech"
 TOTAL_COST = "total_cost"
 
 # Every key the schema defines; save_polytope writes all of them.

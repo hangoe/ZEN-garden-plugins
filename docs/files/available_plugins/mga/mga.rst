@@ -141,6 +141,14 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
       ``[start_year, end_year]`` pairs (inclusive, non-overlapping). One
       axis is created per (node/group, period) combination, named
       ``<node_or_group>_<start_year>_<end_year>``.
+    * ``node_capex_by_technology`` (dict): per-node annualised-capex axes,
+      restricted to a named technology group (e.g. only renewables), summed
+      over all model years. ``nodes`` uses the same name-or-lumped-dict
+      format as ``node_capex``; ``technology_groups`` uses the same format
+      over technology names (e.g.
+      ``[{"renewables": ["pv", "wind", "hydro"]}]``). One axis is created
+      per (node/group, technology-group) combination, named
+      ``<node_or_group>_<technology_group_name>``.
     * ``include_cost`` (bool, default false): add the total-cost axis.
 
 ``oracle`` (dict, oracle mode)
@@ -245,6 +253,12 @@ Example (oracle mode):
                         "nodes": ["DE", "CH"],
                         "periods": [[2021, 2030], [2031, 2040]]
                     },
+                    "node_capex_by_technology": {
+                        "nodes": ["DE", "CH"],
+                        "technology_groups": [
+                            {"renewables": ["pv", "wind", "hydro"]}
+                        ]
+                    },
                     "include_cost": true
                 },
                 "oracle": {
@@ -274,6 +288,12 @@ Example (sampling mode):
                     "node_capex_periods": {
                         "nodes": ["DE", "CH"],
                         "periods": [[2021, 2030], [2031, 2040]]
+                    },
+                    "node_capex_by_technology": {
+                        "nodes": ["DE", "CH"],
+                        "technology_groups": [
+                            {"renewables": ["pv", "wind", "hydro"]}
+                        ]
                     },
                     "include_cost": true
                 },
@@ -305,6 +325,12 @@ Example (bbo mode):
                         "nodes": ["DE", "CH"],
                         "periods": [[2021, 2030], [2031, 2040]]
                     },
+                    "node_capex_by_technology": {
+                        "nodes": ["DE", "CH"],
+                        "technology_groups": [
+                            {"renewables": ["pv", "wind", "hydro"]}
+                        ]
+                    },
                     "include_cost": true
                 },
                 "bbo": {
@@ -335,6 +361,12 @@ Example (batch mode):
                     "node_capex_periods": {
                         "nodes": ["DE", "CH"],
                         "periods": [[2021, 2030], [2031, 2040]]
+                    },
+                    "node_capex_by_technology": {
+                        "nodes": ["DE", "CH"],
+                        "technology_groups": [
+                            {"renewables": ["pv", "wind", "hydro"]}
+                        ]
                     },
                     "include_cost": true
                 },

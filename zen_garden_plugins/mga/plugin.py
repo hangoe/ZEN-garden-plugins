@@ -38,8 +38,9 @@ Glossary
     axis        one exploratory variable, i.e. one coordinate of the explored
                 space: a technology-capacity group, a carrier-import group, a
                 per-node (or per-node-lump) capex group, a per-node capex
-                group restricted to an explicit calendar-year span, or the
-                total cost (see axes.py)
+                group restricted to an explicit calendar-year span, a
+                per-node capex group restricted to a named technology group,
+                or the total cost (see axes.py)
     n_z         number of axes, cost included -- the dimension of the
                 explored space
     C* (c_star) the baseline (cost-optimal) net present cost
@@ -81,6 +82,7 @@ from .polytope_io import (
     CARRIER_IMPORT,
     NODE_CAPEX,
     NODE_CAPEX_PERIOD,
+    NODE_CAPEX_TECH,
     TECH_CAPACITY,
     TOTAL_COST,
 )
@@ -122,8 +124,10 @@ _KNOWN_KEYS = {
         "include_cost",
         "node_capex",
         "node_capex_periods",
+        "node_capex_by_technology",
     },
     "plugins.mga.axes.node_capex_periods": {"nodes", "periods"},
+    "plugins.mga.axes.node_capex_by_technology": {"nodes", "technology_groups"},
     "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
     "plugins.mga.oracle.max_min": {
         "formulation",
@@ -244,6 +248,10 @@ def validate_config(cfg) -> None:
             "plugins.mga.axes.node_capex_periods",
             cfg.get("axes", {}).get("node_capex_periods", {}),
         ),
+        (
+            "plugins.mga.axes.node_capex_by_technology",
+            cfg.get("axes", {}).get("node_capex_by_technology", {}),
+        ),
         ("plugins.mga.oracle", cfg.get("oracle", {})),
         ("plugins.mga.oracle.max_min", cfg.get("oracle", {}).get("max_min", {})),
         ("plugins.mga.sampling", cfg.get("sampling", {})),
@@ -304,6 +312,7 @@ class MGA:
         include_cost=False,
         node_capex=None,
         node_capex_periods=None,
+        node_capex_by_technology=None,
         normalisation="relative",
     ):
         """
@@ -323,6 +332,11 @@ class MGA:
                 calendar-year spans: {"nodes": [...same format as
                 node_capex...], "periods": [[start_year, end_year], ...]}.
                 Produces one axis per (node/lump, period) combination.
+            node_capex_by_technology: Per-node capex axes restricted to a
+                named technology group: {"nodes": [...same format as
+                node_capex...], "technology_groups": [...same format,
+                technology names/lumps...]}. Produces one axis per
+                (node/lump, technology-group) combination.
             normalisation: "relative" (default) scales design axes by their
                 near-optimal maximum; "minmax" maps each axis's own
                 near-optimal [min, max] onto [0, 1]; "units" reports them in
@@ -357,6 +371,7 @@ class MGA:
             carrier_groups,
             node_capex_groups,
             node_capex_period_axes,
+            node_capex_tech_axes,
         ) = build_axis_groups(
             technologies,
             carrier_imports,
@@ -364,13 +379,14 @@ class MGA:
             all_carriers,
             node_capex=node_capex,
             node_capex_periods=node_capex_periods,
+            node_capex_by_technology=node_capex_by_technology,
             all_nodes=all_nodes,
         )
 
         # The single source of truth for axis order everywhere downstream
         # (coordinates, cut normals, polytope columns): technology axes,
-        # carrier axes, node-capex axes, node-capex-period axes, then the
-        # cost axis.
+        # carrier axes, node-capex axes, node-capex-period axes,
+        # node-capex-technology axes, then the cost axis.
         self.axes: list[Axis] = (
             [
                 Axis(
@@ -392,6 +408,16 @@ class MGA:
             + [
                 Axis(name, NODE_CAPEX_PERIOD, tuple(members), None, period=(start, end))
                 for name, members, (start, end) in node_capex_period_axes
+            ]
+            + [
+                Axis(
+                    name,
+                    NODE_CAPEX_TECH,
+                    tuple(node_members),
+                    None,
+                    technologies=tuple(tech_members),
+                )
+                for name, node_members, tech_members in node_capex_tech_axes
             ]
         )
         if include_cost:
@@ -416,7 +442,7 @@ class MGA:
         # transport technologies; .sel(set_location=<node names>) therefore
         # naturally excludes transport-technology capex (invalid entries),
         # the same mechanism the tech-capacity axis already relies on.
-        _node_kinds = (NODE_CAPEX, NODE_CAPEX_PERIOD)
+        _node_kinds = (NODE_CAPEX, NODE_CAPEX_PERIOD, NODE_CAPEX_TECH)
         self._axis_year_indices: dict[str, list] = {}
         if any(axis.kind in _node_kinds for axis in self.axes):
             self.cost_capex_yearly = self.model.variables["cost_capex_yearly"]
@@ -616,9 +642,10 @@ class MGA:
         technologies, restricted by the capacity-type mask; carrier axes sum
         the duration-weighted annual import of the member carriers,
         sum_{m,n,t} tau_t * flow[m, n, t]; node-capex axes sum the annualised
-        capex of the member nodes over all technologies and capacity types,
-        over all model years (NODE_CAPEX) or just the axis's period
-        (NODE_CAPEX_PERIOD).
+        capex of the member nodes over all capacity types, over all model
+        years (NODE_CAPEX) or just the axis's period (NODE_CAPEX_PERIOD),
+        and over either all technologies or just the axis's technology group
+        (NODE_CAPEX_TECH).
         """
         members = list(axis.members)
         if axis.kind == TECH_CAPACITY:
@@ -631,11 +658,13 @@ class MGA:
             return (self._ts_duration * flow.sel(set_carriers=members)).sum(
                 self._CARRIER_AGG + ["set_carriers"]
             )
-        # NODE_CAPEX / NODE_CAPEX_PERIOD: transport technologies have no
-        # valid entry at a node-named location, so they drop out of this
-        # selection for free (same mechanism as _TECH_AGG's unrestricted
-        # set_location sum for tech-capacity axes).
+        # NODE_CAPEX / NODE_CAPEX_PERIOD / NODE_CAPEX_TECH: transport
+        # technologies have no valid entry at a node-named location, so they
+        # drop out of this selection for free (same mechanism as
+        # _TECH_AGG's unrestricted set_location sum for tech-capacity axes).
         term = capex.sel(set_location=members)
+        if axis.technologies is not None:
+            term = term.sel(set_technologies=list(axis.technologies))
         year_ids = self._axis_year_indices.get(axis.name)
         if year_ids is not None:
             term = term.sel(set_time_steps_yearly=year_ids)
@@ -688,8 +717,8 @@ class MGA:
 
     def polytope_metadata(self) -> dict:
         """Self-describing metadata for the saved polytope: per-axis kind,
-        members, capacity type, period and physical unit, plus the
-        normalisation convention (schema owned by polytope_io)."""
+        members, capacity type, period, technologies and physical unit, plus
+        the normalisation convention (schema owned by polytope_io)."""
         units = self.optimization_setup.variables.units
         ureg = self.optimization_setup.energy_system.unit_handling.ureg
         return {
@@ -700,6 +729,11 @@ class MGA:
                     "members": list(axis.members),
                     "capacity_type": axis.capacity_type,
                     "period": list(axis.period) if axis.period is not None else None,
+                    "technologies": (
+                        list(axis.technologies)
+                        if axis.technologies is not None
+                        else None
+                    ),
                     "unit": axis_physical_unit(axis, units, ureg),
                 }
                 for axis in self.axes
@@ -1216,6 +1250,7 @@ def run_mga(
         include_cost=bool(axes_cfg.get("include_cost", False)),
         node_capex=axes_cfg.get("node_capex"),
         node_capex_periods=axes_cfg.get("node_capex_periods"),
+        node_capex_by_technology=axes_cfg.get("node_capex_by_technology"),
         normalisation=config.get("normalisation", "relative"),
     )
     mga.setup()

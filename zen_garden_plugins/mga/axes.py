@@ -15,7 +15,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .polytope_io import NODE_CAPEX, NODE_CAPEX_PERIOD, TECH_CAPACITY, TOTAL_COST
+from .polytope_io import (
+    NODE_CAPEX,
+    NODE_CAPEX_PERIOD,
+    NODE_CAPEX_TECH,
+    TECH_CAPACITY,
+    TOTAL_COST,
+)
 
 # The model variable behind the total-cost axis.
 COST_VARIABLE = "net_present_cost"
@@ -30,10 +36,13 @@ class Axis:
     duration-weighted annual flow_import over the member carriers;
     NODE_CAPEX axes sum cost_capex_yearly over the member nodes and all
     model years; NODE_CAPEX_PERIOD axes do the same but restricted to the
-    years falling in `period`; the single TOTAL_COST axis is the model's net
-    present cost and has no members. capacity_type is the "+"-joined
-    selected type(s) for tech axes and None otherwise. period is
-    (start_year, end_year) for NODE_CAPEX_PERIOD axes and None otherwise.
+    years falling in `period`; NODE_CAPEX_TECH axes do the same but
+    restricted to the member technologies in `technologies`; the single
+    TOTAL_COST axis is the model's net present cost and has no members.
+    capacity_type is the "+"-joined selected type(s) for tech axes and None
+    otherwise. period is (start_year, end_year) for NODE_CAPEX_PERIOD axes
+    and None otherwise. technologies is the selected technology group for
+    NODE_CAPEX_TECH axes and None otherwise.
     """
 
     name: str
@@ -41,6 +50,7 @@ class Axis:
     members: tuple[str, ...]
     capacity_type: str | None
     period: tuple[int, int] | None = None
+    technologies: tuple[str, ...] | None = None
 
 
 def build_axis_groups(
@@ -50,16 +60,20 @@ def build_axis_groups(
     all_carriers,
     node_capex=None,
     node_capex_periods=None,
+    node_capex_by_technology=None,
     all_nodes=(),
 ):
     """Turn the axis config lists into ordered (name, members) groups.
 
     Returns (tech_groups, carrier_groups, node_capex_groups,
-    node_capex_period_axes): the first three are (name, [members]) tuples in
-    the user's order; node_capex_period_axes is a list of
-    (name, [members], (start_year, end_year)) tuples, one per
+    node_capex_period_axes, node_capex_tech_axes): the first three are
+    (name, [members]) tuples in the user's order; node_capex_period_axes is
+    a list of (name, [members], (start_year, end_year)) tuples, one per
     (node/node-lump, period) combination named f"{name}_{start}_{end}",
-    iterated nodes-major/periods-minor.
+    iterated nodes-major/periods-minor; node_capex_tech_axes is a list of
+    (name, [node members], [technology members]) tuples, one per
+    (node/node-lump, technology-group) combination named
+    f"{name}_{tech_group_name}", iterated nodes-major/tech-groups-minor.
     """
     tech_set, carrier_set, node_set = (
         set(all_technologies),
@@ -108,11 +122,50 @@ def build_axis_groups(
         for start, end in periods
     ]
 
+    node_capex_by_technology = node_capex_by_technology or {}
+    tech_filter_node_groups = _parse_axis_list(
+        node_capex_by_technology.get("nodes"),
+        node_set,
+        all_names,
+        "axes.node_capex_by_technology.nodes",
+    )
+    if tech_filter_node_groups and not node_capex_by_technology.get(
+        "technology_groups"
+    ):
+        raise ValueError(
+            "MGA axes.node_capex_by_technology: 'nodes' given without "
+            "'technology_groups'."
+        )
+    if (
+        node_capex_by_technology.get("technology_groups")
+        and not tech_filter_node_groups
+    ):
+        raise ValueError(
+            "MGA axes.node_capex_by_technology: 'technology_groups' given "
+            "without 'nodes'."
+        )
+    technology_groups = (
+        _parse_axis_list(
+            node_capex_by_technology["technology_groups"],
+            tech_set,
+            all_names,
+            "axes.node_capex_by_technology.technology_groups",
+        )
+        if tech_filter_node_groups
+        else []
+    )
+    node_capex_tech_axes = [
+        (f"{node_name}_{tech_name}", node_members, tech_members)
+        for node_name, node_members in tech_filter_node_groups
+        for tech_name, tech_members in technology_groups
+    ]
+
     generated_names = (
         [n for n, _ in tech_groups]
         + [n for n, _ in carrier_groups]
         + [n for n, _ in node_capex_groups]
         + [n for n, _, _ in node_capex_period_axes]
+        + [n for n, _, _ in node_capex_tech_axes]
     )
     duplicates = {n for n in generated_names if generated_names.count(n) > 1}
     if duplicates:
@@ -120,7 +173,13 @@ def build_axis_groups(
             f"MGA: axis name(s) {sorted(duplicates)} used in more than one "
             f"axes.* block."
         )
-    return tech_groups, carrier_groups, node_capex_groups, node_capex_period_axes
+    return (
+        tech_groups,
+        carrier_groups,
+        node_capex_groups,
+        node_capex_period_axes,
+        node_capex_tech_axes,
+    )
 
 
 def _parse_period_list(periods, label):
@@ -218,10 +277,11 @@ def axis_physical_unit(axis, units, ureg):
 
     Tech axes read the capacity_addition unit at the selected capacity type;
     carrier axes annualise the instantaneous flow_import unit (x hour); node
-    capex axes (period or not) read cost_capex_yearly's unit at the member
-    nodes; the cost axis reads COST_VARIABLE's unit. Heterogeneous lumps
-    yield a ' + '-joined string. `units` is the model's variable-unit
-    mapping, which is empty when unit tracking is switched off.
+    capex axes (period- or technology-restricted or not) read
+    cost_capex_yearly's unit at the member nodes, additionally masked to the
+    member technologies when set; the cost axis reads COST_VARIABLE's unit.
+    Heterogeneous lumps yield a ' + '-joined string. `units` is the model's
+    variable-unit mapping, which is empty when unit tracking is switched off.
 
     The unit series are indexed by ZEN-garden's documentation names for the
     dimensions ("technology", "capacity_type", "carrier", "location"), which
@@ -247,11 +307,13 @@ def axis_physical_unit(axis, units, ureg):
         found = sorted({str(u) for u in series[mask].to_numpy()})
         return " + ".join(found) if found else None
 
-    if axis.kind in (NODE_CAPEX, NODE_CAPEX_PERIOD):
+    if axis.kind in (NODE_CAPEX, NODE_CAPEX_PERIOD, NODE_CAPEX_TECH):
         series = units.get("cost_capex_yearly")
         if series is None:
             return None
         mask = series.index.get_level_values("location").isin(axis.members)
+        if axis.technologies is not None:
+            mask &= series.index.get_level_values("technology").isin(axis.technologies)
         found = sorted({str(u) for u in series[mask].to_numpy()})
         return " + ".join(found) if found else None
 
