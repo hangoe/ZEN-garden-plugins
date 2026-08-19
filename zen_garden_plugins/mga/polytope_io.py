@@ -6,8 +6,10 @@ stdlib only) and side-effect-free: importing it does NOT import the MGA plugin
 and therefore registers no event handlers.
 
 Every exploratory variable is an axis -- a technology-capacity group, a
-carrier-import group, or the total cost -- so all per-axis arrays share one
-length and one order, matching the polytope's columns.
+carrier-import group, a per-node (or per-node-lump) capex group, a per-node
+capex group restricted to an explicit year span, or the total cost -- so all
+per-axis arrays share one length and one order, matching the polytope's
+columns.
 
 Schema:
 
@@ -15,7 +17,9 @@ Schema:
     b               (n_rows,)
     X               (n_points, n_axes)   certified near-optimal points
     name_list       (n_axes,) str        axis names, in column order
-    kinds           (n_axes,) str        tech_capacity | carrier_import | total_cost
+    kinds           (n_axes,) str        tech_capacity | carrier_import |
+                                         node_capex | node_capex_period |
+                                         total_cost
     units           (n_axes,) str        physical unit, "" when unknown
     scale           (n_axes,)            physical = normalised * scale + offset
     offset          (n_axes,)
@@ -65,6 +69,8 @@ import numpy as np
 # Axis kinds, stored per axis in `kinds` and in axis_meta_json.
 TECH_CAPACITY = "tech_capacity"
 CARRIER_IMPORT = "carrier_import"
+NODE_CAPEX = "node_capex"
+NODE_CAPEX_PERIOD = "node_capex_period"
 TOTAL_COST = "total_cost"
 
 # Every key the schema defines; save_polytope writes all of them.

@@ -128,6 +128,19 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     * ``technologies``: technology axes; entries are technology names or
       single-key dicts ``{group_name: [members]}`` for lumped axes.
     * ``carrier_imports``: carrier-import axes, same entry format.
+    * ``node_capex``: per-node annualised-capex axes, summed over all model
+      years; entries are node names or single-key dicts
+      ``{group_name: [members]}`` for lumped node groups (e.g. a region made
+      of several nodes). Capex only -- not opex, carrier-trade or carbon
+      cost (carbon cost has no spatial dimension in ZEN-garden at all).
+      Transport technologies are excluded, since their capex is attributed
+      to edges, not nodes.
+    * ``node_capex_periods`` (dict): per-node annualised-capex axes,
+      restricted to explicit calendar-year spans. ``nodes`` uses the same
+      name-or-lumped-dict format as ``node_capex``; ``periods`` is a list of
+      ``[start_year, end_year]`` pairs (inclusive, non-overlapping). One
+      axis is created per (node/group, period) combination, named
+      ``<node_or_group>_<start_year>_<end_year>``.
     * ``include_cost`` (bool, default false): add the total-cost axis.
 
 ``oracle`` (dict, oracle mode)
@@ -227,6 +240,11 @@ Example (oracle mode):
                         {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
                     ],
                     "carrier_imports": ["biomass"],
+                    "node_capex": ["DE", "CH", {"benelux": ["BE", "NL", "LU"]}],
+                    "node_capex_periods": {
+                        "nodes": ["DE", "CH"],
+                        "periods": [[2021, 2030], [2031, 2040]]
+                    },
                     "include_cost": true
                 },
                 "oracle": {
@@ -252,6 +270,11 @@ Example (sampling mode):
                         {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
                     ],
                     "carrier_imports": ["biomass"],
+                    "node_capex": ["DE", "CH", {"benelux": ["BE", "NL", "LU"]}],
+                    "node_capex_periods": {
+                        "nodes": ["DE", "CH"],
+                        "periods": [[2021, 2030], [2031, 2040]]
+                    },
                     "include_cost": true
                 },
                 "sampling": {
@@ -277,6 +300,11 @@ Example (bbo mode):
                         {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
                     ],
                     "carrier_imports": ["biomass"],
+                    "node_capex": ["DE", "CH", {"benelux": ["BE", "NL", "LU"]}],
+                    "node_capex_periods": {
+                        "nodes": ["DE", "CH"],
+                        "periods": [[2021, 2030], [2031, 2040]]
+                    },
                     "include_cost": true
                 },
                 "bbo": {
@@ -303,6 +331,11 @@ Example (batch mode):
                         {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
                     ],
                     "carrier_imports": ["biomass"],
+                    "node_capex": ["DE", "CH", {"benelux": ["BE", "NL", "LU"]}],
+                    "node_capex_periods": {
+                        "nodes": ["DE", "CH"],
+                        "periods": [[2021, 2030], [2031, 2040]]
+                    },
                     "include_cost": true
                 },
                 "batch": {

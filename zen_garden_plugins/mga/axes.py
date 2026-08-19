@@ -2,18 +2,20 @@
 
 An axis is one coordinate of the explored near-optimal space: the summed
 capacity addition of a group of technologies, the duration-weighted annual
-import of a group of carriers, or the total system cost. This module owns
-everything about axes that does not need the optimization model: the Axis
-type, the parsing and validation of the axis config lists, and the
-physical-unit lookup for the polytope metadata. Model-coupled axis logic
-lives in plugin.MGA.
+import of a group of carriers, the summed annualised capex of a group of
+nodes (optionally restricted to an explicit calendar-year span), or the
+total system cost. This module owns everything about axes that does not
+need the optimization model: the Axis type, the parsing and validation of
+the axis config lists, and the physical-unit lookup for the polytope
+metadata. Model-coupled axis logic lives in plugin.MGA.
 """
 
+import itertools
 from dataclasses import dataclass
 
 import numpy as np
 
-from .polytope_io import TECH_CAPACITY, TOTAL_COST
+from .polytope_io import NODE_CAPEX, NODE_CAPEX_PERIOD, TECH_CAPACITY, TOTAL_COST
 
 # The model variable behind the total-cost axis.
 COST_VARIABLE = "net_present_cost"
@@ -25,42 +27,135 @@ class Axis:
 
     TECH_CAPACITY axes sum capacity_addition over the member technologies,
     restricted to the selected capacity type; CARRIER_IMPORT axes sum the
-    duration-weighted annual flow_import over the member carriers; the single
-    TOTAL_COST axis is the model's net present cost and has no members.
-    capacity_type is the "+"-joined selected type(s) for tech axes and None
-    otherwise.
+    duration-weighted annual flow_import over the member carriers;
+    NODE_CAPEX axes sum cost_capex_yearly over the member nodes and all
+    model years; NODE_CAPEX_PERIOD axes do the same but restricted to the
+    years falling in `period`; the single TOTAL_COST axis is the model's net
+    present cost and has no members. capacity_type is the "+"-joined
+    selected type(s) for tech axes and None otherwise. period is
+    (start_year, end_year) for NODE_CAPEX_PERIOD axes and None otherwise.
     """
 
     name: str
     kind: str
     members: tuple[str, ...]
     capacity_type: str | None
+    period: tuple[int, int] | None = None
 
 
-def build_axis_groups(technologies, carrier_imports, all_technologies, all_carriers):
+def build_axis_groups(
+    technologies,
+    carrier_imports,
+    all_technologies,
+    all_carriers,
+    node_capex=None,
+    node_capex_periods=None,
+    all_nodes=(),
+):
     """Turn the axis config lists into ordered (name, members) groups.
 
-    Returns (tech_groups, carrier_groups), each in the user's order.
+    Returns (tech_groups, carrier_groups, node_capex_groups,
+    node_capex_period_axes): the first three are (name, [members]) tuples in
+    the user's order; node_capex_period_axes is a list of
+    (name, [members], (start_year, end_year)) tuples, one per
+    (node/node-lump, period) combination named f"{name}_{start}_{end}",
+    iterated nodes-major/periods-minor.
     """
-    tech_set, carrier_set = set(all_technologies), set(all_carriers)
+    tech_set, carrier_set, node_set = (
+        set(all_technologies),
+        set(all_carriers),
+        set(all_nodes),
+    )
+    # Axis names share one namespace with the model names in the polytope
+    # file, so every group's name must not reuse a technology, carrier or
+    # node name.
+    all_names = tech_set | carrier_set | node_set
     tech_groups = _parse_axis_list(
         technologies, tech_set, tech_set, "axes.technologies"
     )
-    # Axis names share one namespace with the model names in the polytope
-    # file, so carrier groups must not reuse a technology or carrier name.
     carrier_groups = _parse_axis_list(
-        carrier_imports,
-        carrier_set,
-        tech_set | carrier_set,
-        "axes.carrier_imports",
+        carrier_imports, carrier_set, all_names, "axes.carrier_imports"
     )
-    duplicates = {n for n, _ in tech_groups} & {n for n, _ in carrier_groups}
+    node_capex_groups = _parse_axis_list(
+        node_capex, node_set, all_names, "axes.node_capex"
+    )
+
+    node_capex_periods = node_capex_periods or {}
+    period_node_groups = _parse_axis_list(
+        node_capex_periods.get("nodes"),
+        node_set,
+        all_names,
+        "axes.node_capex_periods.nodes",
+    )
+    if period_node_groups and not node_capex_periods.get("periods"):
+        raise ValueError(
+            "MGA axes.node_capex_periods: 'nodes' given without 'periods'."
+        )
+    if node_capex_periods.get("periods") and not period_node_groups:
+        raise ValueError(
+            "MGA axes.node_capex_periods: 'periods' given without 'nodes'."
+        )
+    periods = (
+        _parse_period_list(
+            node_capex_periods["periods"], "axes.node_capex_periods.periods"
+        )
+        if period_node_groups
+        else []
+    )
+    node_capex_period_axes = [
+        (f"{name}_{start}_{end}", members, (start, end))
+        for name, members in period_node_groups
+        for start, end in periods
+    ]
+
+    generated_names = (
+        [n for n, _ in tech_groups]
+        + [n for n, _ in carrier_groups]
+        + [n for n, _ in node_capex_groups]
+        + [n for n, _, _ in node_capex_period_axes]
+    )
+    duplicates = {n for n in generated_names if generated_names.count(n) > 1}
     if duplicates:
         raise ValueError(
-            f"MGA: axis name(s) {sorted(duplicates)} used for both a "
-            f"technology and a carrier axis."
+            f"MGA: axis name(s) {sorted(duplicates)} used in more than one "
+            f"axes.* block."
         )
-    return tech_groups, carrier_groups
+    return tech_groups, carrier_groups, node_capex_groups, node_capex_period_axes
+
+
+def _parse_period_list(periods, label):
+    """Parse and validate a list of [start_year, end_year] pairs.
+
+    Rejects a missing/empty list, malformed entries, start > end, and
+    pairwise-overlapping periods (inclusive bounds). Returns a list of
+    (start, end) int tuples, in the given order.
+    """
+    if not periods:
+        raise ValueError(
+            f"MGA {label}: must be a non-empty list of [start_year, end_year] pairs."
+        )
+    parsed = []
+    for period in periods:
+        well_formed = (
+            isinstance(period, (list, tuple))
+            and len(period) == 2
+            and all(isinstance(y, int) and not isinstance(y, bool) for y in period)
+        )
+        if not well_formed:
+            raise ValueError(
+                f"MGA {label}: invalid period {period!r}, expected "
+                f"[start_year, end_year]."
+            )
+        start, end = period
+        if start > end:
+            raise ValueError(f"MGA {label}: period [{start}, {end}] has start > end.")
+        parsed.append((start, end))
+    for (s1, e1), (s2, e2) in itertools.combinations(parsed, 2):
+        if s1 <= e2 and s2 <= e1:
+            raise ValueError(
+                f"MGA {label}: periods [{s1}, {e1}] and [{s2}, {e2}] overlap."
+            )
+    return parsed
 
 
 def _parse_axis_list(entries, valid_members, reserved_names, label):
@@ -122,15 +217,16 @@ def axis_physical_unit(axis, units, ureg):
     """Physical unit string of one axis value, or None if unavailable.
 
     Tech axes read the capacity_addition unit at the selected capacity type;
-    carrier axes annualise the instantaneous flow_import unit (x hour); the
-    cost axis reads COST_VARIABLE's unit. Heterogeneous lumps yield a
-    ' + '-joined string. `units` is the model's variable-unit mapping, which
-    is empty when unit tracking is switched off.
+    carrier axes annualise the instantaneous flow_import unit (x hour); node
+    capex axes (period or not) read cost_capex_yearly's unit at the member
+    nodes; the cost axis reads COST_VARIABLE's unit. Heterogeneous lumps
+    yield a ' + '-joined string. `units` is the model's variable-unit
+    mapping, which is empty when unit tracking is switched off.
 
     The unit series are indexed by ZEN-garden's documentation names for the
-    dimensions ("technology", "capacity_type", "carrier"), which differ from
-    the set names the variables themselves are indexed by ("set_technologies"
-    and so on).
+    dimensions ("technology", "capacity_type", "carrier", "location"), which
+    differ from the set names the variables themselves are indexed by
+    ("set_technologies" and so on).
     """
     if axis.kind == TOTAL_COST:
         series = units.get(COST_VARIABLE)
@@ -148,6 +244,14 @@ def axis_physical_unit(axis, units, ureg):
         ) & series.index.get_level_values("capacity_type").isin(
             axis.capacity_type.split("+")
         )
+        found = sorted({str(u) for u in series[mask].to_numpy()})
+        return " + ".join(found) if found else None
+
+    if axis.kind in (NODE_CAPEX, NODE_CAPEX_PERIOD):
+        series = units.get("cost_capex_yearly")
+        if series is None:
+            return None
+        mask = series.index.get_level_values("location").isin(axis.members)
         found = sorted({str(u) for u in series[mask].to_numpy()})
         return " + ".join(found) if found else None
 

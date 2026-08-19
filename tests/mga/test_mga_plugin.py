@@ -11,12 +11,21 @@ import numpy as np
 import pandas as pd
 import pint
 import pytest
+import xarray as xr
 
 from zen_garden_plugins.mga.axes import Axis, axis_physical_unit, build_axis_groups
+from zen_garden_plugins.mga.batch_driver import run_batch_mode
 from zen_garden_plugins.mga.oracle_driver import run_oracle_mode
-from zen_garden_plugins.mga.plugin import MGA, normalise_rows, validate_config
+from zen_garden_plugins.mga.plugin import (
+    MGA,
+    _year_indices_in_period,
+    normalise_rows,
+    validate_config,
+)
 from zen_garden_plugins.mga.polytope_io import (
     CARRIER_IMPORT,
+    NODE_CAPEX,
+    NODE_CAPEX_PERIOD,
     TECH_CAPACITY,
     TOTAL_COST,
     Polytope,
@@ -25,29 +34,33 @@ from zen_garden_plugins.mga.polytope_io import (
     phys_to_norm,
     save_polytope,
 )
-from zen_garden_plugins.mga.batch_driver import run_batch_mode
 from zen_garden_plugins.mga.supf_driver import run_bbo_mode, run_sampling_mode
 
 TECHS = ["nuclear", "pv", "battery", "hydro_a", "hydro_b"]
 CARRIERS = ["biomass", "hydrogen"]
+NODES = ["DE", "CH", "FR", "BE", "NL", "LU"]
 
 
 # ---------------------------------------------------------------- axis config
 
 
 def test_singleton_and_lumped_axes_keep_user_order():
-    tech_groups, carrier_groups = build_axis_groups(
-        ["nuclear", {"hydro": ["hydro_a", "hydro_b"]}],
-        ["biomass"],
-        TECHS,
-        CARRIERS,
+    tech_groups, carrier_groups, node_capex_groups, node_capex_period_axes = (
+        build_axis_groups(
+            ["nuclear", {"hydro": ["hydro_a", "hydro_b"]}],
+            ["biomass"],
+            TECHS,
+            CARRIERS,
+        )
     )
     assert tech_groups == [("nuclear", ["nuclear"]), ("hydro", ["hydro_a", "hydro_b"])]
     assert carrier_groups == [("biomass", ["biomass"])]
+    assert node_capex_groups == []
+    assert node_capex_period_axes == []
 
 
 def test_empty_config_yields_no_axes():
-    assert build_axis_groups(None, None, TECHS, CARRIERS) == ([], [])
+    assert build_axis_groups(None, None, TECHS, CARRIERS) == ([], [], [], [])
 
 
 @pytest.mark.parametrize(
@@ -75,6 +88,169 @@ def test_axis_name_cannot_be_used_twice_across_blocks():
         )
 
 
+# --------------------------------------------------------- node capex axes
+
+
+def test_singleton_and_lumped_node_capex_axes_keep_user_order():
+    _, _, node_capex_groups, _ = build_axis_groups(
+        None,
+        None,
+        TECHS,
+        CARRIERS,
+        node_capex=["DE", {"benelux": ["BE", "NL", "LU"]}],
+        all_nodes=NODES,
+    )
+    assert node_capex_groups == [
+        ("DE", ["DE"]),
+        ("benelux", ["BE", "NL", "LU"]),
+    ]
+
+
+@pytest.mark.parametrize(
+    "node_capex",
+    [
+        ["typo"],  # unknown node
+        ["DE", "DE"],  # duplicate axis name
+        [{"DE": ["CH"]}],  # group shadows a node
+        [{"g": ["DE"]}, {"h": ["DE"]}],  # member twice
+        [{"g": []}],  # empty member list
+    ],
+)
+def test_invalid_node_capex_configs_are_rejected(node_capex):
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None, None, TECHS, CARRIERS, node_capex=node_capex, all_nodes=NODES
+        )
+
+
+def test_node_capex_axis_name_cannot_collide_with_tech_or_carrier_axis():
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            [{"shared": ["nuclear"]}],
+            None,
+            TECHS,
+            CARRIERS,
+            node_capex=[{"shared": ["DE"]}],
+            all_nodes=NODES,
+        )
+
+
+def test_node_capex_periods_produce_nodes_major_periods_minor_axes():
+    _, _, _, node_capex_period_axes = build_axis_groups(
+        None,
+        None,
+        TECHS,
+        CARRIERS,
+        node_capex_periods={
+            "nodes": ["DE", {"benelux": ["BE", "NL", "LU"]}],
+            "periods": [[2021, 2030], [2031, 2040]],
+        },
+        all_nodes=NODES,
+    )
+    assert node_capex_period_axes == [
+        ("DE_2021_2030", ["DE"], (2021, 2030)),
+        ("DE_2031_2040", ["DE"], (2031, 2040)),
+        ("benelux_2021_2030", ["BE", "NL", "LU"], (2021, 2030)),
+        ("benelux_2031_2040", ["BE", "NL", "LU"], (2031, 2040)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "node_capex_periods",
+    [
+        {"nodes": ["DE"]},  # nodes without periods
+        {"periods": [[2021, 2030]]},  # periods without nodes
+        {"nodes": ["DE"], "periods": []},  # empty periods list
+        {"nodes": ["DE"], "periods": [[2030, 2021]]},  # start > end
+        {"nodes": ["DE"], "periods": [[2021, 2030.5]]},  # non-int bound
+        {"nodes": ["DE"], "periods": [[2021, 2030], [2025, 2035]]},  # overlap
+    ],
+)
+def test_invalid_node_capex_periods_are_rejected(node_capex_periods):
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_capex_periods=node_capex_periods,
+            all_nodes=NODES,
+        )
+
+
+# ------------------------------------------------------- node capex aggregation
+
+
+def _capex_data_array():
+    """A tiny cost_capex_yearly-shaped DataArray: `nuclear` valid at nodes
+    DE/CH (3 years each), `transport_ab` valid only at edge "AB" -- mirroring
+    ZEN-garden's mixed node/edge set_location coordinate, with NaN at every
+    invalid (technology, location) combination."""
+    coords = {
+        "set_technologies": ["nuclear", "transport_ab"],
+        "set_capacity_types": ["power"],
+        "set_location": ["DE", "CH", "AB"],
+        "set_time_steps_yearly": [0, 1, 2],
+    }
+    data = np.full((2, 1, 3, 3), np.nan)
+    data[0, 0, 0, :] = [10.0, 20.0, 30.0]  # nuclear @ DE, years 0/1/2
+    data[0, 0, 1, :] = [5.0, 5.0, 5.0]  # nuclear @ CH, years 0/1/2
+    data[1, 0, 2, :] = [100.0, 100.0, 100.0]  # transport_ab @ edge AB
+    return xr.DataArray(
+        data,
+        dims=[
+            "set_technologies",
+            "set_capacity_types",
+            "set_location",
+            "set_time_steps_yearly",
+        ],
+        coords=coords,
+    )
+
+
+def _node_capex_stub(axis_year_indices=None):
+    return SimpleNamespace(
+        _axis_year_indices=axis_year_indices or {},
+        _NODE_AGG_CAPEX=MGA._NODE_AGG_CAPEX,
+    )
+
+
+def test_node_capex_axis_sums_capex_over_years_and_transport_tech_drops_out():
+    axis = Axis("DE", NODE_CAPEX, ("DE",), None)
+    value = MGA._design_axis_terms(
+        _node_capex_stub(), axis, None, None, capex=_capex_data_array()
+    )
+    assert float(value.sum(skipna=True)) == pytest.approx(60.0)  # 10+20+30
+
+
+def test_node_capex_axis_lumps_multiple_nodes():
+    axis = Axis("DE_CH", NODE_CAPEX, ("DE", "CH"), None)
+    value = MGA._design_axis_terms(
+        _node_capex_stub(), axis, None, None, capex=_capex_data_array()
+    )
+    assert float(value.sum(skipna=True)) == pytest.approx(75.0)  # 60 + 15
+
+
+def test_node_capex_period_axis_restricts_to_the_axis_year_indices():
+    axis = Axis("DE_early", NODE_CAPEX_PERIOD, ("DE",), None, period=(0, 1))
+    stub = _node_capex_stub({"DE_early": [0, 1]})
+    value = MGA._design_axis_terms(stub, axis, None, None, capex=_capex_data_array())
+    assert float(value.sum(skipna=True)) == pytest.approx(30.0)  # 10+20
+
+
+def test_year_indices_in_period_is_boundary_inclusive():
+    year_indices = [0, 1, 2, 3]
+    real_years = [2021, 2025, 2030, 2035]
+    assert _year_indices_in_period((2021, 2030), year_indices, real_years) == [0, 1, 2]
+    assert _year_indices_in_period((2025, 2025), year_indices, real_years) == [1]
+
+
+def test_year_indices_in_period_is_empty_when_period_covers_no_model_year():
+    year_indices = [0, 1]
+    real_years = [2024, 2025]
+    assert _year_indices_in_period((2030, 2035), year_indices, real_years) == []
+
+
 # ------------------------------------------------------------ config validation
 
 
@@ -85,6 +261,22 @@ def test_valid_config_passes():
             "mode": "oracle",
             "axes": {"technologies": ["nuclear"], "include_cost": True},
             "oracle": {"tolerance": 0.1, "max_min": {"use_bigM": True}},
+        }
+    )
+
+
+def test_valid_node_capex_config_passes():
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": "oracle",
+            "axes": {
+                "node_capex": ["DE", {"benelux": ["BE", "NL", "LU"]}],
+                "node_capex_periods": {
+                    "nodes": ["DE"],
+                    "periods": [[2021, 2030], [2031, 2040]],
+                },
+            },
         }
     )
 
@@ -195,6 +387,7 @@ def test_unknown_normalisation_value_is_rejected():
         {"sampling": {"tolerance_probb": 0.9}},  # sampling typo
         {"bbo": {"tolerance_probb": 0.9}},  # bbo typo
         {"batch": {"batch_sizee": 8}},  # batch typo
+        {"axes": {"node_capex_periods": {"preiods": []}}},  # nested typo
     ],
 )
 def test_unknown_config_keys_are_rejected(cfg):
@@ -500,6 +693,14 @@ IMPORT_UNITS = _units_series(
     [("biomass", "DE", 0), ("hydrogen", "DE", 0)],
     ["gigawatt", "gigawatt"],
 )
+CAPEX_UNITS = _units_series(
+    ["technology", "capacity_type", "location", "year"],
+    [
+        ("nuclear", "power", "DE", 2050),
+        ("battery", "power", "CH", 2050),
+    ],
+    ["megaEuro", "megaEuro"],
+)
 
 
 def test_tech_axis_unit_follows_the_selected_capacity_type():
@@ -515,6 +716,18 @@ def test_carrier_axis_unit_is_annualised():
     axis = Axis("biomass", CARRIER_IMPORT, ("biomass",), None)
     unit = axis_physical_unit(axis, {"flow_import": IMPORT_UNITS}, pint.UnitRegistry())
     assert unit == "gigawatt * hour"
+
+
+def test_node_capex_axis_unit_reads_the_capex_variable_unit():
+    axis = Axis("DE", NODE_CAPEX, ("DE",), None)
+    units = {"cost_capex_yearly": CAPEX_UNITS}
+    assert axis_physical_unit(axis, units, pint.UnitRegistry()) == "megaEuro"
+
+
+def test_node_capex_period_axis_unit_reads_the_capex_variable_unit():
+    axis = Axis("DE_2021_2030", NODE_CAPEX_PERIOD, ("DE",), None, period=(2021, 2030))
+    units = {"cost_capex_yearly": CAPEX_UNITS}
+    assert axis_physical_unit(axis, units, pint.UnitRegistry()) == "megaEuro"
 
 
 def test_cost_axis_reads_the_cost_variable_unit():
