@@ -629,6 +629,81 @@ def test_support_function_wraps_solve_direction_with_iter_label():
     assert support_value == 0.42
 
 
+# ------------------------------------------------------------- weights mode
+
+
+def test_build_weighted_objective_sums_weighted_axis_expressions():
+    class _StubMGA:
+        z_names = ["nuclear", "DE_2021_2030"]
+        axes = [
+            SimpleNamespace(name="nuclear"),
+            SimpleNamespace(name="DE_2021_2030"),
+        ]
+
+        def axis_expression(self, axis):
+            return {"nuclear": 10.0, "DE_2021_2030": 5.0}[axis.name]
+
+    obj = MGA._build_weighted_objective(
+        _StubMGA(), {"nuclear": 2.0, "DE_2021_2030": -1.0}
+    )
+
+    assert obj == pytest.approx(2.0 * 10.0 + (-1.0) * 5.0)
+
+
+def test_build_weighted_objective_skips_axes_without_an_explicit_weight():
+    class _StubMGA:
+        z_names = ["nuclear", "pv"]
+        axes = [SimpleNamespace(name="nuclear"), SimpleNamespace(name="pv")]
+
+        def axis_expression(self, axis):
+            return {"nuclear": 10.0, "pv": 99.0}[axis.name]
+
+    obj = MGA._build_weighted_objective(_StubMGA(), {"nuclear": 3.0})
+
+    assert obj == pytest.approx(30.0)
+
+
+def test_build_weighted_objective_rejects_unknown_axis_name():
+    class _StubMGA:
+        z_names = ["nuclear", "pv"]
+        axes = [SimpleNamespace(name="nuclear"), SimpleNamespace(name="pv")]
+
+    with pytest.raises(ValueError, match=r"unknown axis name.*wind"):
+        MGA._build_weighted_objective(_StubMGA(), {"wind": 1.0})
+
+
+def test_build_weighted_objective_rejects_empty_weights():
+    class _StubMGA:
+        z_names = ["nuclear"]
+        axes = [SimpleNamespace(name="nuclear")]
+
+    with pytest.raises(ValueError, match=r"no \(known\) weights"):
+        MGA._build_weighted_objective(_StubMGA(), {})
+
+
+def test_run_iteration_solves_and_postprocesses_with_weighted_objective():
+    calls = {"objective_args": None, "postprocess_label": None}
+
+    class _StubModel:
+        def add_objective(self, obj, sense, overwrite):
+            calls["objective_args"] = (obj, sense, overwrite)
+
+    class _StubMGA:
+        model = _StubModel()
+
+        def _build_weighted_objective(self, weights):
+            assert weights == {"nuclear": 1.0}
+            return "the-objective"
+
+        def _solve_and_postprocess(self, label):
+            calls["postprocess_label"] = label
+
+    MGA.run_iteration(_StubMGA(), {"nuclear": 1.0}, 3)
+
+    assert calls["objective_args"] == ("the-objective", "min", True)
+    assert calls["postprocess_label"] == "mga_iter_3"
+
+
 # -------------------------------------------------------------- supplied bounds
 
 

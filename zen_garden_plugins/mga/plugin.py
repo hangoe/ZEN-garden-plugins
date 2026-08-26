@@ -526,37 +526,41 @@ class MGA:
     # ------------------------------------------------------------------
 
     def run_iteration(self, weights: dict, iter_id: int):
-        """Solve one weights-mode iteration: min sum_i w_i * capacity_addition_i.
+        """Solve one weights-mode iteration: min sum_i w_i * axis_expression(axis_i).
 
-        The capacity-type mask applies here as in oracle mode, so storage
-        technologies are weighted on their energy capacity only (summing
-        power and energy would mix units).
+        Weight keys are axis names from the axes config block (self.z_names)
+        -- technology names or lumped tech groups, carrier-import axes,
+        node-capex axes (optionally period- or technology-restricted), or
+        the total-cost axis. The capacity-type mask applies to tech axes as
+        in oracle mode, so storage technologies are weighted on their energy
+        capacity only (summing power and energy would mix units).
         """
-        weight_array = self._build_weight_array(weights)
-        self.model.add_objective(
-            (weight_array * self._capacity_mask * self.capacity_addition).sum(),
-            sense="min",
-            overwrite=True,
-        )
+        obj = self._build_weighted_objective(weights)
+        self.model.add_objective(obj, sense="min", overwrite=True)
         logging.info(f"MGA: iteration {iter_id} weights = {weights}")
         self._solve_and_postprocess(f"mga_iter_{iter_id}")
 
-    def _build_weight_array(self, weights: dict) -> xr.DataArray:
-        """Weights as a DataArray over the full set_technologies coordinate.
+    def _build_weighted_objective(self, weights: dict):
+        """Weighted sum of axis expressions: sum_i w_i * axis_expression(axis_i).
 
-        Unlisted technologies get weight 0 (unknown names raise KeyError);
-        the product with capacity_addition then aggregates the remaining dims
-        by broadcasting.
+        Weight keys must be axis names (self.z_names, built from the axes
+        config block); unknown keys raise. Axes without an explicit weight
+        contribute nothing.
         """
-        tech_coord = self.capacity_addition.coords["set_technologies"]
-        weight_array = xr.DataArray(
-            np.zeros(tech_coord.size),
-            dims=("set_technologies",),
-            coords={"set_technologies": tech_coord},
-        )
-        for tech, weight in weights.items():
-            weight_array.loc[tech] = float(weight)
-        return weight_array
+        unknown = sorted(set(weights) - set(self.z_names))
+        if unknown:
+            raise ValueError(
+                f"MGA weights mode: unknown axis name(s) {unknown}; "
+                f"expected one of {self.z_names} (see the axes config block)."
+            )
+        terms = [
+            float(weights[axis.name]) * self.axis_expression(axis)
+            for axis in self.axes
+            if axis.name in weights
+        ]
+        if not terms:
+            raise ValueError("MGA weights mode: iteration has no (known) weights.")
+        return sum(terms)
 
     # ------------------------------------------------------------------
     # oracle mode: axes on the model

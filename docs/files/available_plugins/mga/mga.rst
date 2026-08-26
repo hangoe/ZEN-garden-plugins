@@ -9,7 +9,9 @@ cost optimum. It subscribes to the ``after_solve`` event and re-solves the
 baseline model under a near-optimality budget in one of five modes:
 
 * ``weights`` -- one re-solve per user-provided weight dict, minimising
-  ``sum_i w_i * capacity_addition_i`` (the classical MGA recipe).
+  ``sum_i w_i * axis_i`` over the axes named in the ``axes`` config block
+  (the classical MGA recipe, generalised from plain technology capacity to
+  any axis kind -- e.g. a node-capex or node-capex-period axis).
 * ``oracle`` -- the ORACLE algorithm (Turan, Moret, Bardow 2026,
   `doi:10.1016/j.compchemeng.2026.109630
   <https://doi.org/10.1016/j.compchemeng.2026.109630>`_), which iteratively
@@ -119,12 +121,20 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     axis magnitudes and a cut-validity guard sized for O(1) normalised
     coordinates anchored at offset=0, both of which assume relative
     normalisation; ``"units"``/``"minmax"`` raise a config error there. This
-    key has no effect in ``"weights"`` mode, which never normalises axes.
+    key has no effect in ``"weights"`` mode, which never normalises axes --
+    weights are applied in each axis's own physical units.
 
 ``iterations`` (list of dicts, weights mode)
-    One ``{"weights": {technology: weight}}`` dict per iteration.
+    One ``{"weights": {axis_name: weight}}`` dict per iteration. Each key
+    must be the name of an axis defined in the ``axes`` config block below
+    (a technology, a lumped technology group, a carrier-import axis, a
+    node-capex axis, or the cost axis) -- axes without a listed weight
+    contribute nothing; an unknown axis name raises an error listing the
+    available names. The objective for that iteration is
+    ``sum_i w_i * axis_expression(axis_i)`` in each axis's own physical
+    units (e.g. GW for a technology axis, currency for a node-capex axis).
 
-``axes`` (dict, oracle, sampling, bbo and batch modes)
+``axes`` (dict, all modes)
     * ``technologies``: technology axes; entries are technology names or
       single-key dicts ``{group_name: [members]}`` for lumped axes.
     * ``carrier_imports``: carrier-import axes, same entry format.
@@ -232,6 +242,33 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
       persistent worker processes solving directions concurrently.
       Independent of ``batch_size`` -- if ``batch_size > n_workers``,
       workers just pick up the next queued direction as they free up.
+
+Example (weights mode):
+
+.. code-block:: json
+
+    {
+        "plugins": {
+            "mga": {
+                "mode": "weights",
+                "epsilon": 0.1,
+                "axes": {
+                    "technologies": [
+                        "nuclear",
+                        {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
+                    ],
+                    "node_capex_periods": {
+                        "nodes": ["DE", "CH"],
+                        "periods": [[2021, 2030], [2031, 2040]]
+                    }
+                },
+                "iterations": [
+                    {"weights": {"nuclear": 1.0}},
+                    {"weights": {"hydro_lump": 1.0, "DE_2021_2030": 0.5}}
+                ]
+            }
+        }
+    }
 
 Example (oracle mode):
 
