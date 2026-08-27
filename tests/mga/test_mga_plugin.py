@@ -5,6 +5,7 @@ config parsing, the config-key validation, row normalisation, and the
 polytope npz round-trip.
 """
 
+import functools
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,6 +19,7 @@ from zen_garden_plugins.mga.batch_driver import run_batch_mode
 from zen_garden_plugins.mga.oracle_driver import run_oracle_mode
 from zen_garden_plugins.mga.plugin import (
     MGA,
+    _round_to_one_significant_figure,
     _year_indices_in_period,
     normalise_rows,
     validate_config,
@@ -379,6 +381,84 @@ def test_node_capex_axis_without_technology_restriction_sums_every_technology():
     assert float(value.sum(skipna=True)) == pytest.approx(360.0)  # 60 nuclear + 300 pv
 
 
+def _capex_data_array_multi_node_multi_tech():
+    """A cost_capex_yearly-shaped DataArray with two nodes ("DE", "CH") and
+    two technologies ("nuclear", "pv") at each, for testing that
+    _design_axis_reference_total's node-widening keeps a NODE_CAPEX_TECH
+    axis's technology filter while adding the other node's capex for the
+    same technology."""
+    coords = {
+        "set_technologies": ["nuclear", "pv"],
+        "set_capacity_types": ["power"],
+        "set_location": ["DE", "CH"],
+        "set_time_steps_yearly": [0, 1, 2],
+    }
+    data = np.empty((2, 1, 2, 3))
+    data[0, 0, 0, :] = [10.0, 20.0, 30.0]  # nuclear @ DE, years 0/1/2
+    data[0, 0, 1, :] = [1.0, 2.0, 3.0]  # nuclear @ CH, years 0/1/2
+    data[1, 0, 0, :] = [100.0, 100.0, 100.0]  # pv @ DE, years 0/1/2
+    data[1, 0, 1, :] = [7.0, 7.0, 7.0]  # pv @ CH, years 0/1/2
+    return xr.DataArray(
+        data,
+        dims=[
+            "set_technologies",
+            "set_capacity_types",
+            "set_location",
+            "set_time_steps_yearly",
+        ],
+        coords=coords,
+    )
+
+
+def _reference_total_stub(axis_year_indices=None, all_nodes=None):
+    """Same shape as _node_capex_stub(), plus what
+    _design_axis_reference_total additionally needs: all_nodes to widen
+    into, and a self-bound _design_axis_terms to delegate to (mirroring how
+    MGA.__init__ builds a real instance)."""
+    stub = SimpleNamespace(
+        _axis_year_indices=axis_year_indices or {},
+        _NODE_AGG_CAPEX=MGA._NODE_AGG_CAPEX,
+        all_nodes=all_nodes or [],
+    )
+    stub._design_axis_terms = functools.partial(MGA._design_axis_terms, stub)
+    return stub
+
+
+def test_reference_total_node_capex_widens_to_all_nodes():
+    axis = Axis("DE", NODE_CAPEX, ("DE",), None)
+    stub = _reference_total_stub(all_nodes=["DE", "CH"])
+    value = MGA._design_axis_reference_total(
+        stub, axis, None, None, capex=_capex_data_array()
+    )
+    assert float(value.sum(skipna=True)) == pytest.approx(75.0)  # DE 60 + CH 15
+
+
+def test_reference_total_node_capex_cumulative_ignores_its_own_year_window():
+    # normalisation="share" wants one total shared by every node_capex/
+    # node_capex_cumulative axis in a run, regardless of period -- so a
+    # cumulative axis's reference total must ignore its own until_year and
+    # match the full-horizon, all-nodes total (see
+    # test_reference_total_node_capex_widens_to_all_nodes), even though
+    # _axis_year_indices below *does* have an entry for this axis's name.
+    axis = Axis("DE_until_2030", NODE_CAPEX_CUMULATIVE, ("DE",), None, period=(None, 1))
+    stub = _reference_total_stub(
+        axis_year_indices={"DE_until_2030": [0, 1]}, all_nodes=["DE", "CH"]
+    )
+    value = MGA._design_axis_reference_total(
+        stub, axis, None, None, capex=_capex_data_array()
+    )
+    assert float(value.sum(skipna=True)) == pytest.approx(75.0)  # DE 60 + CH 15, not 40
+
+
+def test_reference_total_node_capex_tech_keeps_technology_filter():
+    axis = Axis("DE_nuclear", NODE_CAPEX_TECH, ("DE",), None, technologies=("nuclear",))
+    stub = _reference_total_stub(all_nodes=["DE", "CH"])
+    value = MGA._design_axis_reference_total(
+        stub, axis, None, None, capex=_capex_data_array_multi_node_multi_tech()
+    )
+    assert float(value.sum(skipna=True)) == pytest.approx(66.0)  # nuclear @ DE 60 + CH 6, pv excluded
+
+
 def test_year_indices_in_period_is_boundary_inclusive():
     year_indices = [0, 1, 2, 3]
     real_years = [2021, 2025, 2030, 2035]
@@ -396,6 +476,31 @@ def test_year_indices_in_period_with_no_lower_bound_covers_from_the_first_year()
     year_indices = [0, 1, 2, 3]
     real_years = [2021, 2025, 2030, 2035]
     assert _year_indices_in_period((None, 2030), year_indices, real_years) == [0, 1, 2]
+
+
+def test_round_to_one_significant_figure_rounds_mantissa_down():
+    assert _round_to_one_significant_figure(12.3e6) == pytest.approx(1e7)
+
+
+def test_round_to_one_significant_figure_rounds_mantissa_up():
+    assert _round_to_one_significant_figure(18e12) == pytest.approx(2e13)
+
+
+def test_round_to_one_significant_figure_leaves_a_power_of_ten_unchanged():
+    assert _round_to_one_significant_figure(5e7) == pytest.approx(5e7)
+
+
+def test_round_to_one_significant_figure_carries_a_mantissa_that_rounds_to_ten():
+    assert _round_to_one_significant_figure(9.5e6) == pytest.approx(1e7)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+def test_round_to_one_significant_figure_leaves_non_positive_or_non_finite_unchanged(value):
+    result = _round_to_one_significant_figure(value)
+    if value != value:  # nan != nan
+        assert result != result
+    else:
+        assert result == value
 
 
 # ------------------------------------------------------------ config validation
@@ -519,6 +624,58 @@ def test_minmax_normalisation_rejected_in_oracle_mode():
                 "normalisation": "minmax",
                 "axes": {"technologies": ["nuclear"], "include_cost": True},
                 "oracle": {"tolerance": 0.1},
+            }
+        )
+
+
+@pytest.mark.parametrize("mode", ["sampling", "bbo", "batch"])
+def test_share_normalisation_accepted_outside_oracle_mode(mode):
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": mode,
+            "normalisation": "share",
+            "axes": {"node_capex": ["DE"], "include_cost": True},
+            mode: {"tolerance_prob": 0.9},
+        }
+    )
+
+
+def test_share_normalisation_rejected_in_oracle_mode():
+    with pytest.raises(ValueError, match="normalisation='share'"):
+        validate_config(
+            {
+                "epsilon": 0.1,
+                "mode": "oracle",
+                "normalisation": "share",
+                "axes": {"node_capex": ["DE"], "include_cost": True},
+                "oracle": {"tolerance": 0.1},
+            }
+        )
+
+
+def test_share_normalisation_rejected_with_technology_axes():
+    with pytest.raises(ValueError, match="normalisation='share'"):
+        validate_config(
+            {
+                "epsilon": 0.1,
+                "mode": "sampling",
+                "normalisation": "share",
+                "axes": {"technologies": ["nuclear"]},
+                "sampling": {"tolerance_prob": 0.9},
+            }
+        )
+
+
+def test_share_normalisation_rejected_with_carrier_import_axes():
+    with pytest.raises(ValueError, match="normalisation='share'"):
+        validate_config(
+            {
+                "epsilon": 0.1,
+                "mode": "sampling",
+                "normalisation": "share",
+                "axes": {"carrier_imports": ["biomass"]},
+                "sampling": {"tolerance_prob": 0.9},
             }
         )
 
@@ -768,6 +925,21 @@ def test_supplied_bounds_must_cover_design_axes_exactly(bounds):
         MGA._read_supplied_bounds(mga, bounds)
 
 
+def test_share_normalisation_raises_for_non_positive_reference_total():
+    axis = Axis("DE", NODE_CAPEX, ("DE",), None)
+    mga = SimpleNamespace(
+        axes=[axis],
+        design_axes=[axis],
+        c_star=1000.0,
+        epsilon=0.1,
+        normalisation="share",
+        _share_reference_phys=np.array([0.0]),  # no baseline capex anywhere
+    )
+    mga._read_supplied_bounds = functools.partial(MGA._read_supplied_bounds, mga)
+    with pytest.raises(RuntimeError, match="non-positive baseline reference total"):
+        MGA.solve_axis_bounds(mga, supplied_bounds={"DE": [10.0, 50.0]})
+
+
 # ------------------------------------------------------- outer approximation
 
 
@@ -854,6 +1026,17 @@ def test_minmax_normalisation_maps_near_optimal_range_to_unit_interval():
     assert np.allclose(phys_to_norm(np.array([lower, upper]), scale, offset), [[0.0, 0.0], [1.0, 1.0]])
     midpoint = lower + 0.5 * (upper - lower)
     assert np.allclose(phys_to_norm(midpoint, scale, offset), [0.5, 0.5])
+
+
+def test_share_normalisation_scale_is_reference_total_offset_is_zero():
+    # normalisation="share" sets scale=reference_total (a fixed baseline
+    # quantity, see _design_axis_reference_total), offset=0, so an axis's
+    # physical value maps to its fraction of that reference total.
+    reference_total = np.array([200.0, 500.0])
+    scale, offset = reference_total, np.zeros(2)
+    phys = np.array([50.0, 125.0])
+    assert np.allclose(phys_to_norm(phys, scale, offset), [0.25, 0.25])
+    assert np.allclose(norm_to_phys(np.array([1.0, 1.0]), scale, offset), reference_total)
 
 
 def test_cost_axis_maps_optimum_to_zero_and_budget_to_one():

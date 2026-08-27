@@ -114,15 +114,33 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     just of its distance from the origin. ``"units"`` instead reports
     design axes in their own physical units (scale = 1, offset = 0) -- only
     sensible when the selected axes already share comparable units and
-    magnitudes, which is the user's judgement to make, not the plugin's. The
-    cost axis is always normalised relative to the near-optimality budget
-    regardless of this setting. Oracle mode requires the default
-    ``"relative"``: its max-min MILP relies on ``big_M``/``t_max`` dominating
-    axis magnitudes and a cut-validity guard sized for O(1) normalised
-    coordinates anchored at offset=0, both of which assume relative
-    normalisation; ``"units"``/``"minmax"`` raise a config error there. This
-    key has no effect in ``"weights"`` mode, which never normalises axes --
-    weights are applied in each axis's own physical units.
+    magnitudes, which is the user's judgement to make, not the plugin's.
+    ``"share"`` reports each design axis as its fraction of a fixed
+    reference total (scale = that total, offset = 0), evaluated once on the
+    baseline design z*, rounded to one significant figure (e.g. ``12.3e6``
+    becomes ``10e6``, ``18e12`` becomes ``20e12``), rather than recomputed
+    for each explored point: every ``node_capex`` and ``node_capex_cumulative``
+    axis in a run shares one identical total -- summed over every node and
+    the full model horizon, regardless of a given ``node_capex_cumulative``
+    axis's own ``until_year`` -- while each ``node_capex_by_technology`` axis
+    instead divides by its own technology group's total (also summed over
+    every node and the full horizon). The rounded total actually used, and
+    the raw baseline value it was rounded from, are both recorded per axis
+    in the run's ``axis_meta_json`` (as ``share_reference_total`` /
+    ``share_reference_total_raw``), and logged once per distinct total when
+    the run starts. It is only supported for capex axes (``node_capex``,
+    ``node_capex_cumulative``, ``node_capex_by_technology``) -- a config
+    error is raised if ``"share"`` is selected alongside any
+    ``technologies`` or ``carrier_imports`` axes. The cost axis is always
+    normalised relative to the near-optimality budget regardless of this
+    setting. Oracle mode
+    requires the default ``"relative"``: its max-min MILP relies on
+    ``big_M``/``t_max`` dominating axis magnitudes and a cut-validity guard
+    sized for O(1) normalised coordinates anchored at offset=0, both of
+    which assume relative normalisation; ``"units"``/``"minmax"``/``"share"``
+    raise a config error there. This key has no effect in ``"weights"``
+    mode, which never normalises axes -- weights are applied in each axis's
+    own physical units.
 
 ``iterations`` (list of dicts, weights mode)
     One ``{"weights": {axis_name: weight}}`` dict per iteration. Each key

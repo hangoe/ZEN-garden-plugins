@@ -53,9 +53,18 @@ Glossary
                 lower bound and offset = lower bound, so each axis spans
                 exactly [0, 1] between its own near-optimal min and max;
                 under "units", scale = 1 and offset = 0, so design axes are
-                reported in their own physical units. Either way the cost
-                axis uses scale = epsilon * C* and offset = C*, so 0 is the
-                cost optimum and 1 the budget.
+                reported in their own physical units; under "share" (capex
+                axes only), scale = a fixed reference total evaluated once
+                on the baseline design z*, rounded to one significant figure
+                (not recomputed per explored point) and offset = 0 -- every
+                NODE_CAPEX/_CUMULATIVE axis in the run shares one identical
+                total (all nodes, the full model horizon), while a
+                NODE_CAPEX_TECH axis instead divides by its own technology
+                group's total (all nodes, full horizon); both the rounded
+                total and its raw, unrounded value are recorded per axis in
+                polytope_metadata(). Either way the cost axis uses
+                scale = epsilon * C*
+                and offset = C*, so 0 is the cost optimum and 1 the budget.
 
 Every solve is written to disk as a sibling sub-solution of the baseline via
 Postprocess.
@@ -67,6 +76,7 @@ docs/files/available_plugins/mga.
 pyoNearOpt compatibility is documented in oracle_driver.py.
 """
 
+import dataclasses
 import logging
 import time
 
@@ -221,6 +231,23 @@ def _year_indices_in_period(period, year_indices, real_years):
     ]
 
 
+def _round_to_one_significant_figure(value: float) -> float:
+    """Round a positive value to one significant figure, nearest -- e.g.
+    12.3e6 -> 1e7 (10e6), 18e12 -> 2e13 (20e12). Leaves non-positive or
+    non-finite values (e.g. the TOTAL_COST axis's NaN placeholder)
+    unchanged. Used to give normalisation="share" a round, easily
+    communicated reference total instead of an arbitrary baseline value.
+    """
+    if value <= 0 or not np.isfinite(value):
+        return value
+    exponent = int(np.floor(np.log10(value)))
+    mantissa = round(value / 10.0**exponent)
+    if mantissa >= 10:
+        mantissa = 1
+        exponent += 1
+    return float(mantissa * 10.0**exponent)
+
+
 def normalise_rows(A, b):
     """Scale every row of ``A z <= b`` to unit Euclidean length.
 
@@ -267,19 +294,29 @@ def validate_config(cfg) -> None:
             )
 
     normalisation = cfg.get("normalisation", "relative")
-    if normalisation not in ("relative", "minmax", "units"):
+    if normalisation not in ("relative", "minmax", "units", "share"):
         raise ValueError(
             f"Unknown MGA normalisation: {normalisation!r}. Expected "
-            f"'relative', 'minmax' or 'units'."
+            f"'relative', 'minmax', 'units' or 'share'."
         )
-    if cfg.get("mode") == "oracle" and normalisation in ("units", "minmax"):
+    axes_cfg = cfg.get("axes", {})
+    if normalisation == "share" and (
+        axes_cfg.get("technologies") or axes_cfg.get("carrier_imports")
+    ):
+        raise ValueError(
+            "MGA: normalisation='share' only supports capex axes "
+            "(node_capex / node_capex_cumulative / node_capex_by_technology); "
+            "remove axes.technologies/axes.carrier_imports or use a "
+            "different normalisation."
+        )
+    if cfg.get("mode") == "oracle" and normalisation in ("units", "minmax", "share"):
         raise ValueError(
             f"MGA: normalisation={normalisation!r} is not supported in "
             "oracle mode -- oracle's max-min MILP relies on big_M/t_max "
             "dominating axis magnitudes and a cut-validity guard sized for "
             "O(1) normalised coordinates anchored at offset=0, both of "
             "which assume 'relative' normalisation. Use sampling or bbo "
-            "mode for 'units'/'minmax'."
+            "mode for 'units'/'minmax'/'share'."
         )
 
 
@@ -344,7 +381,16 @@ class MGA:
             normalisation: "relative" (default) scales design axes by their
                 near-optimal maximum; "minmax" maps each axis's own
                 near-optimal [min, max] onto [0, 1]; "units" reports them in
-                raw physical units. The cost axis is always budget-relative.
+                raw physical units; "share" (capex axes only) reports each
+                axis as a fraction of a fixed reference total at the
+                baseline design z*, rounded to one significant figure --
+                one shared total across all nodes and the full model
+                horizon for every node_capex/node_capex_cumulative axis,
+                and a separate per-technology-group total (also all nodes,
+                full horizon) for node_capex_by_technology axes; both the
+                rounded total and the raw value it came from are recorded
+                per axis in polytope_metadata(). The cost axis is always
+                budget-relative.
                 See solve_axis_bounds().
         """
         if epsilon <= 0:
@@ -369,7 +415,7 @@ class MGA:
             )
         else:
             all_carriers = []
-        all_nodes = list(optimization_setup.energy_system.set_nodes)
+        self.all_nodes = list(optimization_setup.energy_system.set_nodes)
         (
             tech_groups,
             carrier_groups,
@@ -385,7 +431,7 @@ class MGA:
             node_capex=node_capex,
             node_capex_cumulative=node_capex_cumulative,
             node_capex_by_technology=node_capex_by_technology,
-            all_nodes=all_nodes,
+            all_nodes=self.all_nodes,
         )
         # Chains of cumulative-capex axis names (same node/lump group,
         # ascending until_year), used by build_initial_outer_approximation
@@ -499,6 +545,52 @@ class MGA:
         self.z_star_phys = np.array(
             [self.axis_value(axis) for axis in self.axes], dtype=float
         )
+
+        # Fixed baseline reference totals for normalisation="share", read now
+        # alongside z_star_phys for the same reason -- not recomputed per
+        # explored point (see _design_axis_reference_total). validate_config
+        # guarantees every axis but TOTAL_COST is a capex-kind axis here.
+        # The raw value is kept (and reported, see polytope_metadata()) for
+        # traceability of how much _round_to_one_significant_figure changed
+        # it; solve_axis_bounds() uses only the rounded scale.
+        self._share_reference_phys_raw = (
+            np.array(
+                [
+                    np.nan
+                    if axis.kind == TOTAL_COST
+                    else self._axis_reference_total_value(axis)
+                    for axis in self.axes
+                ],
+                dtype=float,
+            )
+            if self.normalisation == "share"
+            else None
+        )
+        self._share_reference_phys = (
+            np.array(
+                [
+                    _round_to_one_significant_figure(v)
+                    for v in self._share_reference_phys_raw
+                ],
+                dtype=float,
+            )
+            if self.normalisation == "share"
+            else None
+        )
+        if self.normalisation == "share":
+            # Log each distinct reference total once -- every node_capex/
+            # node_capex_cumulative axis shares one, and each node_capex_tech
+            # technology group contributes its own.
+            logged_raw = set()
+            for axis, raw in zip(self.axes, self._share_reference_phys_raw):
+                if axis.kind == TOTAL_COST or raw in logged_raw:
+                    continue
+                logged_raw.add(raw)
+                logging.info(
+                    f"MGA: normalisation='share' reference total for "
+                    f"{axis.name!r}'s group: {raw:.6g} rounded to "
+                    f"{_round_to_one_significant_figure(raw):.6g}"
+                )
 
         # 1-based, matching pyoNearOpt's iteration numbers in diagnostics.csv.
         self._iter_count = 1
@@ -711,6 +803,39 @@ class MGA:
             )
         )
 
+    def _design_axis_reference_total(self, axis: Axis, capacity, flow, capex=None):
+        """Reference total for normalisation="share": the same
+        `_design_axis_terms` computation as `axis`, with its node membership
+        widened to every node in the model and any year-window restriction
+        removed -- the sentinel `name` is never a key in
+        `_axis_year_indices`, so a NODE_CAPEX_CUMULATIVE axis's own
+        until_year no longer applies, and every NODE_CAPEX/_CUMULATIVE axis
+        in a run shares one identical full-horizon, all-node total.
+        `axis.technologies` is left untouched, so NODE_CAPEX_TECH axes still
+        divide by their own technology group's full-horizon, all-node total,
+        not the grand total. Only called for capex-kind axes
+        (NODE_CAPEX/_CUMULATIVE/_TECH) -- normalisation="share" is rejected
+        at config-validation time for any other axis kind, including
+        TOTAL_COST.
+        """
+        widened = dataclasses.replace(
+            axis, name="__share_reference_total__", members=tuple(self.all_nodes)
+        )
+        return self._design_axis_terms(widened, capacity, flow, capex=capex)
+
+    def _axis_reference_total_value(self, axis: Axis) -> float:
+        """Value of one axis's share reference total on the baseline
+        solution (called once, in __init__, alongside z_star_phys)."""
+        flow = None if self.flow_import is None else self.flow_import.solution
+        capex = (
+            None if self.cost_capex_yearly is None else self.cost_capex_yearly.solution
+        )
+        return float(
+            self._design_axis_reference_total(
+                axis, self.capacity_addition.solution, flow, capex=capex
+            )
+        )
+
     # ------------------------------------------------------------------
     # oracle mode: coordinates
     # ------------------------------------------------------------------
@@ -736,8 +861,10 @@ class MGA:
 
     def polytope_metadata(self) -> dict:
         """Self-describing metadata for the saved polytope: per-axis kind,
-        members, capacity type, period, technologies and physical unit, plus
-        the normalisation convention (schema owned by polytope_io)."""
+        members, capacity type, period, technologies, physical unit and (for
+        normalisation="share") the rounded reference total actually used as
+        scale plus the raw baseline value it was rounded from, alongside the
+        normalisation convention (schema owned by polytope_io)."""
         units = self.optimization_setup.variables.units
         ureg = self.optimization_setup.energy_system.unit_handling.ureg
         return {
@@ -754,8 +881,18 @@ class MGA:
                         else None
                     ),
                     "unit": axis_physical_unit(axis, units, ureg),
+                    "share_reference_total": (
+                        float(self._share_reference_phys[i])
+                        if self.normalisation == "share" and axis.kind != TOTAL_COST
+                        else None
+                    ),
+                    "share_reference_total_raw": (
+                        float(self._share_reference_phys_raw[i])
+                        if self.normalisation == "share" and axis.kind != TOTAL_COST
+                        else None
+                    ),
                 }
-                for axis in self.axes
+                for i, axis in enumerate(self.axes)
             ],
             "normalisation": (
                 "physical = normalised * scale + offset, per axis; design "
@@ -766,6 +903,12 @@ class MGA:
                     else "(upper bound - lower bound, lower bound) -- "
                     "near-optimal [min, max] mapped to [0, 1]"
                     if self.normalisation == "minmax"
+                    else "(reference total, 0) -- share of a fixed "
+                    "baseline (z*) reference total; one shared total per "
+                    "run for node_capex/node_capex_cumulative (all nodes, "
+                    "full horizon), a separate per-technology-group total "
+                    "for node_capex_tech"
+                    if self.normalisation == "share"
                     else "(upper bound, 0)"
                 )
                 + ", the cost axis always (epsilon * c_star, c_star)"
@@ -803,7 +946,7 @@ class MGA:
 
         bounds, scale, offset = [], [], []
         design_index = 0
-        for axis in self.axes:
+        for i, axis in enumerate(self.axes):
             if axis.kind == TOTAL_COST:
                 lo, hi = self.c_star, (1.0 + self.epsilon) * self.c_star
                 # 0 is the cost optimum, 1 the near-optimality budget.
@@ -845,6 +988,20 @@ class MGA:
                     )
                 scale.append(span)
                 offset.append(lo)
+            elif self.normalisation == "share":
+                # The axis reaches 1 if it accounts for its whole group's
+                # baseline (z*) total -- a fixed reference, not recomputed
+                # per explored point (see _design_axis_reference_total).
+                ref = float(self._share_reference_phys[i])
+                if not np.isfinite(ref) or ref <= 0:
+                    raise RuntimeError(
+                        f"MGA: axis {axis.name!r} has non-positive baseline "
+                        f"reference total {ref:.6g}; normalisation='share' "
+                        f"requires a positive reference. Remove the axis or "
+                        f"use 'relative'/'minmax'/'units'."
+                    )
+                scale.append(ref)
+                offset.append(0.0)
             else:
                 # The axis reaches 1 at its near-optimal maximum.
                 scale.append(hi)
