@@ -25,7 +25,7 @@ from zen_garden_plugins.mga.plugin import (
 from zen_garden_plugins.mga.polytope_io import (
     CARRIER_IMPORT,
     NODE_CAPEX,
-    NODE_CAPEX_PERIOD,
+    NODE_CAPEX_CUMULATIVE,
     NODE_CAPEX_TECH,
     TECH_CAPACITY,
     TOTAL_COST,
@@ -50,8 +50,9 @@ def test_singleton_and_lumped_axes_keep_user_order():
         tech_groups,
         carrier_groups,
         node_capex_groups,
-        node_capex_period_axes,
+        node_capex_cumulative_axes,
         node_capex_tech_axes,
+        node_capex_cumulative_chains,
     ) = build_axis_groups(
         ["nuclear", {"hydro": ["hydro_a", "hydro_b"]}],
         ["biomass"],
@@ -61,12 +62,13 @@ def test_singleton_and_lumped_axes_keep_user_order():
     assert tech_groups == [("nuclear", ["nuclear"]), ("hydro", ["hydro_a", "hydro_b"])]
     assert carrier_groups == [("biomass", ["biomass"])]
     assert node_capex_groups == []
-    assert node_capex_period_axes == []
+    assert node_capex_cumulative_axes == []
     assert node_capex_tech_axes == []
+    assert node_capex_cumulative_chains == []
 
 
 def test_empty_config_yields_no_axes():
-    assert build_axis_groups(None, None, TECHS, CARRIERS) == ([], [], [], [], [])
+    assert build_axis_groups(None, None, TECHS, CARRIERS) == ([], [], [], [], [], [])
 
 
 @pytest.mark.parametrize(
@@ -98,7 +100,7 @@ def test_axis_name_cannot_be_used_twice_across_blocks():
 
 
 def test_singleton_and_lumped_node_capex_axes_keep_user_order():
-    _, _, node_capex_groups, _, _ = build_axis_groups(
+    _, _, node_capex_groups, _, _, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -141,45 +143,68 @@ def test_node_capex_axis_name_cannot_collide_with_tech_or_carrier_axis():
         )
 
 
-def test_node_capex_periods_produce_nodes_major_periods_minor_axes():
-    _, _, _, node_capex_period_axes, _ = build_axis_groups(
+def test_node_capex_cumulative_produces_nodes_major_until_years_minor_axes():
+    _, _, _, node_capex_cumulative_axes, _, node_capex_cumulative_chains = (
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_capex_cumulative={
+                "nodes": ["DE", {"benelux": ["BE", "NL", "LU"]}],
+                "until_years": [2030, 2040],
+            },
+            all_nodes=NODES,
+        )
+    )
+    assert node_capex_cumulative_axes == [
+        ("DE_until_2030", ["DE"], 2030),
+        ("DE_until_2040", ["DE"], 2040),
+        ("benelux_until_2030", ["BE", "NL", "LU"], 2030),
+        ("benelux_until_2040", ["BE", "NL", "LU"], 2040),
+    ]
+    assert node_capex_cumulative_chains == [
+        ["DE_until_2030", "DE_until_2040"],
+        ["benelux_until_2030", "benelux_until_2040"],
+    ]
+
+
+def test_node_capex_cumulative_chains_are_sorted_ascending_by_until_year():
+    _, _, _, _, _, node_capex_cumulative_chains = build_axis_groups(
         None,
         None,
         TECHS,
         CARRIERS,
-        node_capex_periods={
+        node_capex_cumulative={
             "nodes": ["DE", {"benelux": ["BE", "NL", "LU"]}],
-            "periods": [[2021, 2030], [2031, 2040]],
+            "until_years": [2050, 2030, 2040],
         },
         all_nodes=NODES,
     )
-    assert node_capex_period_axes == [
-        ("DE_2021_2030", ["DE"], (2021, 2030)),
-        ("DE_2031_2040", ["DE"], (2031, 2040)),
-        ("benelux_2021_2030", ["BE", "NL", "LU"], (2021, 2030)),
-        ("benelux_2031_2040", ["BE", "NL", "LU"], (2031, 2040)),
+    assert node_capex_cumulative_chains == [
+        ["DE_until_2030", "DE_until_2040", "DE_until_2050"],
+        ["benelux_until_2030", "benelux_until_2040", "benelux_until_2050"],
     ]
 
 
 @pytest.mark.parametrize(
-    "node_capex_periods",
+    "node_capex_cumulative",
     [
-        {"nodes": ["DE"]},  # nodes without periods
-        {"periods": [[2021, 2030]]},  # periods without nodes
-        {"nodes": ["DE"], "periods": []},  # empty periods list
-        {"nodes": ["DE"], "periods": [[2030, 2021]]},  # start > end
-        {"nodes": ["DE"], "periods": [[2021, 2030.5]]},  # non-int bound
-        {"nodes": ["DE"], "periods": [[2021, 2030], [2025, 2035]]},  # overlap
+        {"nodes": ["DE"]},  # nodes without until_years
+        {"until_years": [2030]},  # until_years without nodes
+        {"nodes": ["DE"], "until_years": []},  # empty until_years list
+        {"nodes": ["DE"], "until_years": [2030.5]},  # non-int year
+        {"nodes": ["DE"], "until_years": [2030, 2030]},  # duplicate year
     ],
 )
-def test_invalid_node_capex_periods_are_rejected(node_capex_periods):
+def test_invalid_node_capex_cumulative_configs_are_rejected(node_capex_cumulative):
     with pytest.raises(ValueError):
         build_axis_groups(
             None,
             None,
             TECHS,
             CARRIERS,
-            node_capex_periods=node_capex_periods,
+            node_capex_cumulative=node_capex_cumulative,
             all_nodes=NODES,
         )
 
@@ -188,7 +213,7 @@ def test_invalid_node_capex_periods_are_rejected(node_capex_periods):
 
 
 def test_node_capex_by_technology_produces_nodes_major_tech_groups_minor_axes():
-    _, _, _, _, node_capex_tech_axes = build_axis_groups(
+    _, _, _, _, node_capex_tech_axes, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -304,9 +329,9 @@ def test_node_capex_axis_lumps_multiple_nodes():
     assert float(value.sum(skipna=True)) == pytest.approx(75.0)  # 60 + 15
 
 
-def test_node_capex_period_axis_restricts_to_the_axis_year_indices():
-    axis = Axis("DE_early", NODE_CAPEX_PERIOD, ("DE",), None, period=(0, 1))
-    stub = _node_capex_stub({"DE_early": [0, 1]})
+def test_node_capex_cumulative_axis_restricts_to_years_up_to_until_year():
+    axis = Axis("DE_until_2030", NODE_CAPEX_CUMULATIVE, ("DE",), None, period=(None, 1))
+    stub = _node_capex_stub({"DE_until_2030": [0, 1]})
     value = MGA._design_axis_terms(stub, axis, None, None, capex=_capex_data_array())
     assert float(value.sum(skipna=True)) == pytest.approx(30.0)  # 10+20
 
@@ -367,6 +392,12 @@ def test_year_indices_in_period_is_empty_when_period_covers_no_model_year():
     assert _year_indices_in_period((2030, 2035), year_indices, real_years) == []
 
 
+def test_year_indices_in_period_with_no_lower_bound_covers_from_the_first_year():
+    year_indices = [0, 1, 2, 3]
+    real_years = [2021, 2025, 2030, 2035]
+    assert _year_indices_in_period((None, 2030), year_indices, real_years) == [0, 1, 2]
+
+
 # ------------------------------------------------------------ config validation
 
 
@@ -388,9 +419,9 @@ def test_valid_node_capex_config_passes():
             "mode": "oracle",
             "axes": {
                 "node_capex": ["DE", {"benelux": ["BE", "NL", "LU"]}],
-                "node_capex_periods": {
+                "node_capex_cumulative": {
                     "nodes": ["DE"],
-                    "periods": [[2021, 2030], [2031, 2040]],
+                    "until_years": [2030, 2040, 2050],
                 },
                 "node_capex_by_technology": {
                     "nodes": ["DE"],
@@ -507,7 +538,7 @@ def test_unknown_normalisation_value_is_rejected():
         {"sampling": {"tolerance_probb": 0.9}},  # sampling typo
         {"bbo": {"tolerance_probb": 0.9}},  # bbo typo
         {"batch": {"batch_sizee": 8}},  # batch typo
-        {"axes": {"node_capex_periods": {"preiods": []}}},  # nested typo
+        {"axes": {"node_capex_cumulative": {"unti_years": []}}},  # nested typo
         {"axes": {"node_capex_by_technology": {"technolgy_groups": []}}},  # nested typo
     ],
 )
@@ -737,6 +768,45 @@ def test_supplied_bounds_must_cover_design_axes_exactly(bounds):
         MGA._read_supplied_bounds(mga, bounds)
 
 
+# ------------------------------------------------------- outer approximation
+
+
+def _outer_approx_stub(monotone_capex_chains):
+    z_names = ["DE_until_2030", "DE_until_2040"]
+    bounds_phys = np.array([[0.0, 100.0], [0.0, 200.0]])
+    scale = bounds_phys[:, 1]  # "relative" normalisation: scale=upper, offset=0
+    offset = np.zeros(2)
+    return SimpleNamespace(
+        n_z=2,
+        z_names=z_names,
+        bounds_phys=bounds_phys,
+        scale=scale,
+        offset=offset,
+        z_star_norm=np.array([0.5, 0.5]),  # physical [50, 100]: monotone-consistent
+        _monotone_capex_chains=monotone_capex_chains,
+    )
+
+
+def test_build_initial_outer_approximation_adds_monotonicity_rows_for_capex_chains():
+    stub = _outer_approx_stub([["DE_until_2030", "DE_until_2040"]])
+    A0, b0 = MGA.build_initial_outer_approximation(stub)
+    assert A0.shape[0] == 2 * stub.n_z + 1
+    # The extra row is z(DE_until_2030) <= z(DE_until_2040): positive
+    # coefficient at the earlier axis, negative at the later one, offset=0
+    # keeps b at 0 through the normalise_rows scaling.
+    index = {name: i for i, name in enumerate(stub.z_names)}
+    mono_row, mono_b = A0[-1], b0[-1]
+    assert mono_row[index["DE_until_2030"]] > 0
+    assert mono_row[index["DE_until_2040"]] < 0
+    assert mono_b == pytest.approx(0.0)
+
+
+def test_build_initial_outer_approximation_adds_no_rows_without_capex_chains():
+    stub = _outer_approx_stub([])
+    A0, _ = MGA.build_initial_outer_approximation(stub)
+    assert A0.shape[0] == 2 * stub.n_z
+
+
 # ----------------------------------------------------------- row normalisation
 
 
@@ -928,8 +998,10 @@ def test_node_capex_axis_unit_reads_the_capex_variable_unit():
     assert axis_physical_unit(axis, units, pint.UnitRegistry()) == "megaEuro"
 
 
-def test_node_capex_period_axis_unit_reads_the_capex_variable_unit():
-    axis = Axis("DE_2021_2030", NODE_CAPEX_PERIOD, ("DE",), None, period=(2021, 2030))
+def test_node_capex_cumulative_axis_unit_reads_the_capex_variable_unit():
+    axis = Axis(
+        "DE_until_2030", NODE_CAPEX_CUMULATIVE, ("DE",), None, period=(None, 2030)
+    )
     units = {"cost_capex_yearly": CAPEX_UNITS}
     assert axis_physical_unit(axis, units, pint.UnitRegistry()) == "megaEuro"
 

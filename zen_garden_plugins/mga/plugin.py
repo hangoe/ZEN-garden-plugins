@@ -81,7 +81,7 @@ from .oracle_driver import run_oracle_mode
 from .polytope_io import (
     CARRIER_IMPORT,
     NODE_CAPEX,
-    NODE_CAPEX_PERIOD,
+    NODE_CAPEX_CUMULATIVE,
     NODE_CAPEX_TECH,
     TECH_CAPACITY,
     TOTAL_COST,
@@ -123,10 +123,10 @@ _KNOWN_KEYS = {
         "carrier_imports",
         "include_cost",
         "node_capex",
-        "node_capex_periods",
+        "node_capex_cumulative",
         "node_capex_by_technology",
     },
-    "plugins.mga.axes.node_capex_periods": {"nodes", "periods"},
+    "plugins.mga.axes.node_capex_cumulative": {"nodes", "until_years"},
     "plugins.mga.axes.node_capex_by_technology": {"nodes", "technology_groups"},
     "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
     "plugins.mga.oracle.max_min": {
@@ -206,17 +206,18 @@ def _scalar_da(value):
 def _year_indices_in_period(period, year_indices, real_years):
     """`set_time_steps_yearly` indices whose calendar year falls in `period`.
 
-    `period` is (start_year, end_year), inclusive on both ends. `year_indices`
-    and `real_years` are parallel sequences (year_indices[i]'s calendar year
-    is real_years[i]), as read off cost_capex_yearly's set_time_steps_yearly
-    coordinate and energy_system.set_time_steps_years respectively. Returns
-    an empty list if the period covers no model year.
+    `period` is (start_year, end_year), inclusive on both ends; start may be
+    None, meaning no lower bound (every model year up to and including end).
+    `year_indices` and `real_years` are parallel sequences (year_indices[i]'s
+    calendar year is real_years[i]), as read off cost_capex_yearly's
+    set_time_steps_yearly coordinate and energy_system.set_time_steps_years
+    respectively. Returns an empty list if the period covers no model year.
     """
     start, end = period
     return [
         year_id
         for year_id, real_year in zip(year_indices, real_years, strict=True)
-        if start <= real_year <= end
+        if (start is None or start <= real_year) and real_year <= end
     ]
 
 
@@ -245,8 +246,8 @@ def validate_config(cfg) -> None:
         ("plugins.mga", cfg),
         ("plugins.mga.axes", cfg.get("axes", {})),
         (
-            "plugins.mga.axes.node_capex_periods",
-            cfg.get("axes", {}).get("node_capex_periods", {}),
+            "plugins.mga.axes.node_capex_cumulative",
+            cfg.get("axes", {}).get("node_capex_cumulative", {}),
         ),
         (
             "plugins.mga.axes.node_capex_by_technology",
@@ -311,7 +312,7 @@ class MGA:
         carrier_imports=None,
         include_cost=False,
         node_capex=None,
-        node_capex_periods=None,
+        node_capex_cumulative=None,
         node_capex_by_technology=None,
         normalisation="relative",
     ):
@@ -328,10 +329,13 @@ class MGA:
             include_cost: Add the total-cost axis (oracle mode only).
             node_capex: Per-node capex axes, summed over all model years
                 (names or {group: [members]} lumps of node names).
-            node_capex_periods: Per-node capex axes restricted to explicit
-                calendar-year spans: {"nodes": [...same format as
-                node_capex...], "periods": [[start_year, end_year], ...]}.
-                Produces one axis per (node/lump, period) combination.
+            node_capex_cumulative: Per-node capex axes restricted to all
+                model years up to a target calendar year: {"nodes": [...same
+                format as node_capex...], "until_years": [2030, 2040, ...]}.
+                Produces one axis per (node/lump, until_year) combination,
+                named f"{name}_until_{until_year}". Axes sharing a node/lump
+                group are constrained to be monotonically non-decreasing
+                (see build_initial_outer_approximation()).
             node_capex_by_technology: Per-node capex axes restricted to a
                 named technology group: {"nodes": [...same format as
                 node_capex...], "technology_groups": [...same format,
@@ -370,22 +374,27 @@ class MGA:
             tech_groups,
             carrier_groups,
             node_capex_groups,
-            node_capex_period_axes,
+            node_capex_cumulative_axes,
             node_capex_tech_axes,
+            node_capex_cumulative_chains,
         ) = build_axis_groups(
             technologies,
             carrier_imports,
             all_technologies,
             all_carriers,
             node_capex=node_capex,
-            node_capex_periods=node_capex_periods,
+            node_capex_cumulative=node_capex_cumulative,
             node_capex_by_technology=node_capex_by_technology,
             all_nodes=all_nodes,
         )
+        # Chains of cumulative-capex axis names (same node/lump group,
+        # ascending until_year), used by build_initial_outer_approximation
+        # to add monotonicity rows; empty when there are no such axes.
+        self._monotone_capex_chains = node_capex_cumulative_chains
 
         # The single source of truth for axis order everywhere downstream
         # (coordinates, cut normals, polytope columns): technology axes,
-        # carrier axes, node-capex axes, node-capex-period axes,
+        # carrier axes, node-capex axes, node-capex-cumulative axes,
         # node-capex-technology axes, then the cost axis.
         self.axes: list[Axis] = (
             [
@@ -406,8 +415,14 @@ class MGA:
                 for name, members in node_capex_groups
             ]
             + [
-                Axis(name, NODE_CAPEX_PERIOD, tuple(members), None, period=(start, end))
-                for name, members, (start, end) in node_capex_period_axes
+                Axis(
+                    name,
+                    NODE_CAPEX_CUMULATIVE,
+                    tuple(members),
+                    None,
+                    period=(None, until_year),
+                )
+                for name, members, until_year in node_capex_cumulative_axes
             ]
             + [
                 Axis(
@@ -442,7 +457,7 @@ class MGA:
         # transport technologies; .sel(set_location=<node names>) therefore
         # naturally excludes transport-technology capex (invalid entries),
         # the same mechanism the tech-capacity axis already relies on.
-        _node_kinds = (NODE_CAPEX, NODE_CAPEX_PERIOD, NODE_CAPEX_TECH)
+        _node_kinds = (NODE_CAPEX, NODE_CAPEX_CUMULATIVE, NODE_CAPEX_TECH)
         self._axis_year_indices: dict[str, list] = {}
         if any(axis.kind in _node_kinds for axis in self.axes):
             self.cost_capex_yearly = self.model.variables["cost_capex_yearly"]
@@ -451,13 +466,13 @@ class MGA:
             )
             real_years = list(optimization_setup.energy_system.set_time_steps_years)
             for axis in self.axes:
-                if axis.kind != NODE_CAPEX_PERIOD:
+                if axis.kind != NODE_CAPEX_CUMULATIVE:
                     continue
                 ids = _year_indices_in_period(axis.period, year_indices, real_years)
                 if not ids:
-                    start, end = axis.period
+                    until_year = axis.period[1]
                     raise ValueError(
-                        f"MGA: axis {axis.name!r} period [{start}, {end}] "
+                        f"MGA: axis {axis.name!r} until_year {until_year} "
                         f"covers no model year (model years: "
                         f"{real_years[0]}-{real_years[-1]})."
                     )
@@ -647,9 +662,9 @@ class MGA:
         the duration-weighted annual import of the member carriers,
         sum_{m,n,t} tau_t * flow[m, n, t]; node-capex axes sum the annualised
         capex of the member nodes over all capacity types, over all model
-        years (NODE_CAPEX) or just the axis's period (NODE_CAPEX_PERIOD),
-        and over either all technologies or just the axis's technology group
-        (NODE_CAPEX_TECH).
+        years (NODE_CAPEX) or every model year up to the axis's until_year
+        (NODE_CAPEX_CUMULATIVE), and over either all technologies or just
+        the axis's technology group (NODE_CAPEX_TECH).
         """
         members = list(axis.members)
         if axis.kind == TECH_CAPACITY:
@@ -662,7 +677,7 @@ class MGA:
             return (self._ts_duration * flow.sel(set_carriers=members)).sum(
                 self._CARRIER_AGG + ["set_carriers"]
             )
-        # NODE_CAPEX / NODE_CAPEX_PERIOD / NODE_CAPEX_TECH: transport
+        # NODE_CAPEX / NODE_CAPEX_CUMULATIVE / NODE_CAPEX_TECH: transport
         # technologies have no valid entry at a node-named location, so they
         # drop out of this selection for free (same mechanism as
         # _TECH_AGG's unrestricted set_location sum for tech-capacity axes).
@@ -938,17 +953,36 @@ class MGA:
         """(A0, b0) of the initial outer polytope in normalised coordinates.
 
         Two rows per axis, lower and upper, uniformly for design and cost
-        axes: -z_i <= -lower_i and z_i <= upper_i in physical units. Each raw
+        axes: -z_i <= -lower_i and z_i <= upper_i in physical units. Plus,
+        for every consecutive pair (earlier, later) in each chain of
+        `self._monotone_capex_chains`, one row z_phys(earlier) <=
+        z_phys(later): cost_capex_yearly is non-negative and each
+        cumulative-capex axis's year window nests inside the next, so this
+        holds for every feasible model point and is a free tightening of the
+        outer approximation, not an extra restriction on the model. Each raw
         row a^T z_phys <= b maps to normalised coordinates via
         z_phys = offset + diag(scale) z_norm, i.e. it becomes
         (a o scale)^T z_norm <= b - a^T offset, and the rows are then scaled
         to unit length (see normalise_rows). The result is exactly the box
         lower_i/upper_i <= z_norm,i <= 1 for design axes and 0 <= z_norm <= 1
-        for the cost axis.
+        for the cost axis, plus the monotonicity half-spaces.
         """
         n_z = self.n_z
         A0 = np.vstack([-np.eye(n_z), np.eye(n_z)])
         b0 = np.concatenate([-self.bounds_phys[:, 0], self.bounds_phys[:, 1]])
+
+        if self._monotone_capex_chains:
+            index = {name: i for i, name in enumerate(self.z_names)}
+            mono_rows = []
+            for chain in self._monotone_capex_chains:
+                for earlier, later in zip(chain, chain[1:], strict=False):
+                    row = np.zeros(n_z)
+                    row[index[earlier]] = 1.0
+                    row[index[later]] = -1.0
+                    mono_rows.append(row)
+            if mono_rows:
+                A0 = np.vstack([A0, np.array(mono_rows)])
+                b0 = np.concatenate([b0, np.zeros(len(mono_rows))])
 
         b0 = b0 - A0 @ self.offset  # must precede the column scaling below
         A0 = A0 @ np.diag(self.scale)
@@ -1253,7 +1287,7 @@ def run_mga(
         carrier_imports=axes_cfg.get("carrier_imports"),
         include_cost=bool(axes_cfg.get("include_cost", False)),
         node_capex=axes_cfg.get("node_capex"),
-        node_capex_periods=axes_cfg.get("node_capex_periods"),
+        node_capex_cumulative=axes_cfg.get("node_capex_cumulative"),
         node_capex_by_technology=axes_cfg.get("node_capex_by_technology"),
         normalisation=config.get("normalisation", "relative"),
     )

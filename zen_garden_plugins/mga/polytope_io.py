@@ -7,9 +7,10 @@ and therefore registers no event handlers.
 
 Every exploratory variable is an axis -- a technology-capacity group, a
 carrier-import group, a per-node (or per-node-lump) capex group, a per-node
-capex group restricted to an explicit year span, a per-node capex group
-restricted to a named technology group, or the total cost -- so all per-axis
-arrays share one length and one order, matching the polytope's columns.
+capex group restricted to all years up to a target calendar year, a per-node
+capex group restricted to a named technology group, or the total cost -- so
+all per-axis arrays share one length and one order, matching the polytope's
+columns.
 
 Schema:
 
@@ -18,7 +19,7 @@ Schema:
     X               (n_points, n_axes)   certified near-optimal points
     name_list       (n_axes,) str        axis names, in column order
     kinds           (n_axes,) str        tech_capacity | carrier_import |
-                                         node_capex | node_capex_period |
+                                         node_capex | node_capex_cumulative |
                                          node_capex_tech | total_cost
     units           (n_axes,) str        physical unit, "" when unknown
     scale           (n_axes,)            physical = normalised * scale + offset
@@ -41,7 +42,10 @@ Schema:
                                          support-function modes; NaN if the
                                          run raised before a result
     n_initial_rows  ()                   leading rows of A that form the
-                                         initial box; the rest are cutting planes
+                                         initial box, plus any structural rows
+                                         added up front (e.g. cumulative-capex
+                                         monotonicity); the rest are cutting
+                                         planes
     point_origin    (n_points,) str      z_star | max:<axis> | min:<axis> | iterate
     axis_meta_json  () str               per-axis members and capacity type
     run_json        () str               how the run was configured and ended
@@ -70,7 +74,7 @@ import numpy as np
 TECH_CAPACITY = "tech_capacity"
 CARRIER_IMPORT = "carrier_import"
 NODE_CAPEX = "node_capex"
-NODE_CAPEX_PERIOD = "node_capex_period"
+NODE_CAPEX_CUMULATIVE = "node_capex_cumulative"
 NODE_CAPEX_TECH = "node_capex_tech"
 TOTAL_COST = "total_cost"
 

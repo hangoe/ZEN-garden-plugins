@@ -3,21 +3,20 @@
 An axis is one coordinate of the explored near-optimal space: the summed
 capacity addition of a group of technologies, the duration-weighted annual
 import of a group of carriers, the summed annualised capex of a group of
-nodes (optionally restricted to an explicit calendar-year span), or the
-total system cost. This module owns everything about axes that does not
+nodes (optionally restricted to all years up to a target calendar year), or
+the total system cost. This module owns everything about axes that does not
 need the optimization model: the Axis type, the parsing and validation of
 the axis config lists, and the physical-unit lookup for the polytope
 metadata. Model-coupled axis logic lives in plugin.MGA.
 """
 
-import itertools
 from dataclasses import dataclass
 
 import numpy as np
 
 from .polytope_io import (
     NODE_CAPEX,
-    NODE_CAPEX_PERIOD,
+    NODE_CAPEX_CUMULATIVE,
     NODE_CAPEX_TECH,
     TECH_CAPACITY,
     TOTAL_COST,
@@ -35,21 +34,23 @@ class Axis:
     restricted to the selected capacity type; CARRIER_IMPORT axes sum the
     duration-weighted annual flow_import over the member carriers;
     NODE_CAPEX axes sum cost_capex_yearly over the member nodes and all
-    model years; NODE_CAPEX_PERIOD axes do the same but restricted to the
-    years falling in `period`; NODE_CAPEX_TECH axes do the same but
-    restricted to the member technologies in `technologies`; the single
-    TOTAL_COST axis is the model's net present cost and has no members.
-    capacity_type is the "+"-joined selected type(s) for tech axes and None
-    otherwise. period is (start_year, end_year) for NODE_CAPEX_PERIOD axes
-    and None otherwise. technologies is the selected technology group for
-    NODE_CAPEX_TECH axes and None otherwise.
+    model years; NODE_CAPEX_CUMULATIVE axes do the same but restricted to
+    every model year up to and including `period[1]` (the axis's
+    until_year); NODE_CAPEX_TECH axes do the same but restricted to the
+    member technologies in `technologies`; the single TOTAL_COST axis is the
+    model's net present cost and has no members. capacity_type is the
+    "+"-joined selected type(s) for tech axes and None otherwise. period is
+    (None, until_year) for NODE_CAPEX_CUMULATIVE axes -- the leading None
+    means "no lower bound, from the first model year" -- and None otherwise.
+    technologies is the selected technology group for NODE_CAPEX_TECH axes
+    and None otherwise.
     """
 
     name: str
     kind: str
     members: tuple[str, ...]
     capacity_type: str | None
-    period: tuple[int, int] | None = None
+    period: tuple[int | None, int] | None = None
     technologies: tuple[str, ...] | None = None
 
 
@@ -59,21 +60,26 @@ def build_axis_groups(
     all_technologies,
     all_carriers,
     node_capex=None,
-    node_capex_periods=None,
+    node_capex_cumulative=None,
     node_capex_by_technology=None,
     all_nodes=(),
 ):
     """Turn the axis config lists into ordered (name, members) groups.
 
     Returns (tech_groups, carrier_groups, node_capex_groups,
-    node_capex_period_axes, node_capex_tech_axes): the first three are
-    (name, [members]) tuples in the user's order; node_capex_period_axes is
-    a list of (name, [members], (start_year, end_year)) tuples, one per
-    (node/node-lump, period) combination named f"{name}_{start}_{end}",
-    iterated nodes-major/periods-minor; node_capex_tech_axes is a list of
-    (name, [node members], [technology members]) tuples, one per
+    node_capex_cumulative_axes, node_capex_tech_axes,
+    node_capex_cumulative_chains): the first three are (name, [members])
+    tuples in the user's order; node_capex_cumulative_axes is a list of
+    (name, [members], until_year) tuples, one per (node/node-lump,
+    until_year) combination named f"{name}_until_{until_year}", iterated
+    nodes-major/until-years-minor (config order); node_capex_tech_axes is a
+    list of (name, [node members], [technology members]) tuples, one per
     (node/node-lump, technology-group) combination named
-    f"{name}_{tech_group_name}", iterated nodes-major/tech-groups-minor.
+    f"{name}_{tech_group_name}", iterated nodes-major/tech-groups-minor;
+    node_capex_cumulative_chains is a list of [name, ...] lists, one per
+    node/node-lump group, holding that group's generated axis names sorted
+    ascending by until_year (independent of config order) -- the chains used
+    to constrain cumulative-capex axes to be monotonically non-decreasing.
     """
     tech_set, carrier_set, node_set = (
         set(all_technologies),
@@ -94,32 +100,37 @@ def build_axis_groups(
         node_capex, node_set, all_names, "axes.node_capex"
     )
 
-    node_capex_periods = node_capex_periods or {}
-    period_node_groups = _parse_axis_list(
-        node_capex_periods.get("nodes"),
+    node_capex_cumulative = node_capex_cumulative or {}
+    cumulative_node_groups = _parse_axis_list(
+        node_capex_cumulative.get("nodes"),
         node_set,
         all_names,
-        "axes.node_capex_periods.nodes",
+        "axes.node_capex_cumulative.nodes",
     )
-    if period_node_groups and not node_capex_periods.get("periods"):
+    if cumulative_node_groups and not node_capex_cumulative.get("until_years"):
         raise ValueError(
-            "MGA axes.node_capex_periods: 'nodes' given without 'periods'."
+            "MGA axes.node_capex_cumulative: 'nodes' given without 'until_years'."
         )
-    if node_capex_periods.get("periods") and not period_node_groups:
+    if node_capex_cumulative.get("until_years") and not cumulative_node_groups:
         raise ValueError(
-            "MGA axes.node_capex_periods: 'periods' given without 'nodes'."
+            "MGA axes.node_capex_cumulative: 'until_years' given without 'nodes'."
         )
-    periods = (
-        _parse_period_list(
-            node_capex_periods["periods"], "axes.node_capex_periods.periods"
+    until_years = (
+        _parse_until_years_list(
+            node_capex_cumulative["until_years"],
+            "axes.node_capex_cumulative.until_years",
         )
-        if period_node_groups
+        if cumulative_node_groups
         else []
     )
-    node_capex_period_axes = [
-        (f"{name}_{start}_{end}", members, (start, end))
-        for name, members in period_node_groups
-        for start, end in periods
+    node_capex_cumulative_axes = [
+        (f"{name}_until_{until_year}", members, until_year)
+        for name, members in cumulative_node_groups
+        for until_year in until_years
+    ]
+    node_capex_cumulative_chains = [
+        [f"{name}_until_{until_year}" for until_year in sorted(until_years)]
+        for name, _ in cumulative_node_groups
     ]
 
     node_capex_by_technology = node_capex_by_technology or {}
@@ -164,7 +175,7 @@ def build_axis_groups(
         [n for n, _ in tech_groups]
         + [n for n, _ in carrier_groups]
         + [n for n, _ in node_capex_groups]
-        + [n for n, _, _ in node_capex_period_axes]
+        + [n for n, _, _ in node_capex_cumulative_axes]
         + [n for n, _, _ in node_capex_tech_axes]
     )
     duplicates = {n for n in generated_names if generated_names.count(n) > 1}
@@ -177,43 +188,30 @@ def build_axis_groups(
         tech_groups,
         carrier_groups,
         node_capex_groups,
-        node_capex_period_axes,
+        node_capex_cumulative_axes,
         node_capex_tech_axes,
+        node_capex_cumulative_chains,
     )
 
 
-def _parse_period_list(periods, label):
-    """Parse and validate a list of [start_year, end_year] pairs.
+def _parse_until_years_list(until_years, label):
+    """Parse and validate a list of cumulative-capex target years.
 
-    Rejects a missing/empty list, malformed entries, start > end, and
-    pairwise-overlapping periods (inclusive bounds). Returns a list of
-    (start, end) int tuples, in the given order.
+    Rejects a missing/empty list, non-int (or bool) entries, and duplicates.
+    Unlike periods, cumulative windows are meant to overlap (each nests
+    inside the next), so there is no overlap check. Returns the list of int
+    years, in the given order.
     """
-    if not periods:
-        raise ValueError(
-            f"MGA {label}: must be a non-empty list of [start_year, end_year] pairs."
-        )
+    if not until_years:
+        raise ValueError(f"MGA {label}: must be a non-empty list of years.")
     parsed = []
-    for period in periods:
-        well_formed = (
-            isinstance(period, (list, tuple))
-            and len(period) == 2
-            and all(isinstance(y, int) and not isinstance(y, bool) for y in period)
-        )
-        if not well_formed:
-            raise ValueError(
-                f"MGA {label}: invalid period {period!r}, expected "
-                f"[start_year, end_year]."
-            )
-        start, end = period
-        if start > end:
-            raise ValueError(f"MGA {label}: period [{start}, {end}] has start > end.")
-        parsed.append((start, end))
-    for (s1, e1), (s2, e2) in itertools.combinations(parsed, 2):
-        if s1 <= e2 and s2 <= e1:
-            raise ValueError(
-                f"MGA {label}: periods [{s1}, {e1}] and [{s2}, {e2}] overlap."
-            )
+    for year in until_years:
+        if not isinstance(year, int) or isinstance(year, bool):
+            raise ValueError(f"MGA {label}: invalid year {year!r}, expected an int.")
+        parsed.append(year)
+    duplicates = {y for y in parsed if parsed.count(y) > 1}
+    if duplicates:
+        raise ValueError(f"MGA {label}: duplicate year(s) {sorted(duplicates)}.")
     return parsed
 
 
@@ -277,7 +275,7 @@ def axis_physical_unit(axis, units, ureg):
 
     Tech axes read the capacity_addition unit at the selected capacity type;
     carrier axes annualise the instantaneous flow_import unit (x hour); node
-    capex axes (period- or technology-restricted or not) read
+    capex axes (cumulative- or technology-restricted or not) read
     cost_capex_yearly's unit at the member nodes, additionally masked to the
     member technologies when set; the cost axis reads COST_VARIABLE's unit.
     Heterogeneous lumps yield a ' + '-joined string. `units` is the model's
@@ -307,7 +305,7 @@ def axis_physical_unit(axis, units, ureg):
         found = sorted({str(u) for u in series[mask].to_numpy()})
         return " + ".join(found) if found else None
 
-    if axis.kind in (NODE_CAPEX, NODE_CAPEX_PERIOD, NODE_CAPEX_TECH):
+    if axis.kind in (NODE_CAPEX, NODE_CAPEX_CUMULATIVE, NODE_CAPEX_TECH):
         series = units.get("cost_capex_yearly")
         if series is None:
             return None
