@@ -133,7 +133,25 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     error is raised if ``"share"`` is selected alongside any
     ``technologies`` or ``carrier_imports`` axes. The cost axis is always
     normalised relative to the near-optimality budget regardless of this
-    setting. Oracle mode
+    setting.
+
+    Because the ``"share"`` reference total is shared across every axis in
+    its group rather than being each axis's own near-optimal range (unlike
+    ``"minmax"``), a fixed ``tolerance_explore`` (see ``sampling``/``bbo``/
+    ``batch`` below) is satisfied sooner for an axis whose near-optimal
+    range is a *small* fraction of that shared total, and later for an axis
+    whose range is a *large* fraction of it -- so the sampling/bbo/batch
+    convergence check naturally spends more iterations resolving detail in
+    larger/more decision-relevant regions or technology groups, and
+    comparatively little on small ones. This is a deliberate property of
+    ``"share"`` normalisation, useful precisely when fine-grained coverage
+    of the smallest regions/groups doesn't matter as much as the largest
+    ones -- it is not a convergence-check defect, and ``tolerance_explore``
+    should not be "corrected" to compensate for it. Use ``"minmax"`` instead
+    whenever every axis should be explored to the same *relative* depth
+    regardless of its size.
+
+    Oracle mode
     requires the default ``"relative"``: its max-min MILP relies on
     ``big_M``/``t_max`` dominating axis magnitudes and a cut-validity guard
     sized for O(1) normalised coordinates anchored at offset=0, both of
@@ -211,7 +229,11 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     * ``tolerance_explore`` (float, default 0.1): the support-function gap
       below which a direction counts as well-approximated. Its meaning
       depends on ``normalisation``: a fraction of each axis's near-optimal
-      range under ``"relative"``, a raw physical-unit gap under ``"units"``.
+      range under ``"relative"``/``"minmax"``, a raw physical-unit gap under
+      ``"units"``, and a fraction of a *shared* reference total (not each
+      axis's own range) under ``"share"`` -- see the ``"share"`` paragraph
+      under ``normalisation`` above for why this deliberately spends more
+      exploration on larger axes/regions and less on smaller ones.
     * ``n_samples`` (int, default 1000): directions sampled per iteration to
       estimate the confidence interval.
     * ``alpha`` (float, default 0.05): significance level of the interval.

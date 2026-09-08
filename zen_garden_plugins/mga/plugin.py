@@ -62,7 +62,18 @@ Glossary
                 NODE_CAPEX_TECH axis instead divides by its own technology
                 group's total (all nodes, full horizon); both the rounded
                 total and its raw, unrounded value are recorded per axis in
-                polytope_metadata(). Either way the cost axis uses
+                polytope_metadata(). Since that reference total is shared
+                across a group's axes rather than being each axis's own
+                near-optimal range (unlike "minmax"), sampling/bbo/batch's
+                CI-based convergence check (a fixed tolerance_explore) is
+                satisfied sooner for an axis whose own range is a small
+                share of the group total, and later for one whose range is
+                a large share -- deliberately spending more exploration on
+                larger/more decision-relevant axes and less on smaller
+                ones. This is intended behaviour of "share" normalisation,
+                not a defect; use "minmax" instead when every axis should
+                be explored to the same relative depth regardless of size.
+                Either way the cost axis uses
                 scale = epsilon * C*
                 and offset = C*, so 0 is the cost optimum and 1 the budget.
 
