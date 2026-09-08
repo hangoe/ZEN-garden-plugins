@@ -122,15 +122,17 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     for each explored point: every ``node_capex`` and ``node_capex_cumulative``
     axis in a run shares one identical total -- summed over every node and
     the full model horizon, regardless of a given ``node_capex_cumulative``
-    axis's own ``until_year`` -- while each ``node_capex_by_technology`` axis
-    instead divides by its own technology group's total (also summed over
-    every node and the full horizon). The rounded total actually used, and
-    the raw baseline value it was rounded from, are both recorded per axis
-    in the run's ``axis_meta_json`` (as ``share_reference_total`` /
-    ``share_reference_total_raw``), and logged once per distinct total when
-    the run starts. It is only supported for capex axes (``node_capex``,
-    ``node_capex_cumulative``, ``node_capex_by_technology``) -- a config
-    error is raised if ``"share"`` is selected alongside any
+    axis's own ``until_year`` -- while each ``node_capex_by_technology`` or
+    ``node_capex_cumulative_tech`` axis instead divides by its own
+    technology group's total (also summed over every node and the full
+    horizon, regardless of the latter's own ``until_year``). The rounded
+    total actually used, and the raw baseline value it was rounded from, are
+    both recorded per axis in the run's ``axis_meta_json`` (as
+    ``share_reference_total`` / ``share_reference_total_raw``), and logged
+    once per distinct total when the run starts. It is only supported for
+    capex axes (``node_capex``, ``node_capex_cumulative``,
+    ``node_capex_by_technology``, ``node_capex_cumulative_tech``) -- a
+    config error is raised if ``"share"`` is selected alongside any
     ``technologies`` or ``carrier_imports`` axes. The cost axis is always
     normalised relative to the near-optimality budget regardless of this
     setting.
@@ -202,6 +204,22 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
       ``[{"renewables": ["pv", "wind", "hydro"]}]``). One axis is created
       per (node/group, technology-group) combination, named
       ``<node_or_group>_<technology_group_name>``.
+    * ``node_capex_cumulative_tech`` (dict): per-node annualised-capex axes,
+      restricted to both a target calendar year and a named technology group
+      at once -- the combination of ``node_capex_cumulative`` and
+      ``node_capex_by_technology``. ``nodes``/``technology_groups`` use the
+      same formats as ``node_capex_by_technology``; ``until_years`` the same
+      format as ``node_capex_cumulative``. One axis is created per
+      (node/group, technology-group, until_year) combination, named
+      ``<node_or_group>_<technology_group_name>_until_<until_year>``,
+      iterated nodes-major, technology-groups-middle, until-years-minor. In
+      oracle/sampling/bbo/batch modes, every consecutive pair of these axes
+      sharing *both* a node/group and a technology group is constrained to
+      be non-decreasing (same monotonicity mechanism as
+      ``node_capex_cumulative``, but scoped per (node/group,
+      technology-group) pair -- axes from different technology groups are
+      never compared, since their capex is not a nested cumulative window
+      of the same quantity).
     * ``include_cost`` (bool, default false): add the total-cost axis.
 
 ``oracle`` (dict, oracle mode)
@@ -341,6 +359,14 @@ Example (oracle mode):
                         "nodes": ["DE", "CH"],
                         "technology_groups": [
                             {"renewables": ["pv", "wind", "hydro"]}
+                        ]
+                    },
+                    "node_capex_cumulative_tech": {
+                        "nodes": ["DE", "CH"],
+                        "until_years": [2030, 2040, 2050],
+                        "technology_groups": [
+                            {"renewables": ["pv", "wind", "hydro"]},
+                            "nuclear"
                         ]
                     },
                     "include_cost": true

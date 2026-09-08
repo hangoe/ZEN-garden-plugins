@@ -17,6 +17,7 @@ import numpy as np
 from .polytope_io import (
     NODE_CAPEX,
     NODE_CAPEX_CUMULATIVE,
+    NODE_CAPEX_CUMULATIVE_TECH,
     NODE_CAPEX_TECH,
     TECH_CAPACITY,
     TOTAL_COST,
@@ -37,13 +38,15 @@ class Axis:
     model years; NODE_CAPEX_CUMULATIVE axes do the same but restricted to
     every model year up to and including `period[1]` (the axis's
     until_year); NODE_CAPEX_TECH axes do the same but restricted to the
-    member technologies in `technologies`; the single TOTAL_COST axis is the
-    model's net present cost and has no members. capacity_type is the
-    "+"-joined selected type(s) for tech axes and None otherwise. period is
-    (None, until_year) for NODE_CAPEX_CUMULATIVE axes -- the leading None
-    means "no lower bound, from the first model year" -- and None otherwise.
-    technologies is the selected technology group for NODE_CAPEX_TECH axes
-    and None otherwise.
+    member technologies in `technologies`; NODE_CAPEX_CUMULATIVE_TECH axes
+    combine both restrictions at once (`period` and `technologies` both
+    set); the single TOTAL_COST axis is the model's net present cost and has
+    no members. capacity_type is the "+"-joined selected type(s) for tech
+    axes and None otherwise. period is (None, until_year) for
+    NODE_CAPEX_CUMULATIVE and NODE_CAPEX_CUMULATIVE_TECH axes -- the leading
+    None means "no lower bound, from the first model year" -- and None
+    otherwise. technologies is the selected technology group for
+    NODE_CAPEX_TECH and NODE_CAPEX_CUMULATIVE_TECH axes and None otherwise.
     """
 
     name: str
@@ -62,13 +65,15 @@ def build_axis_groups(
     node_capex=None,
     node_capex_cumulative=None,
     node_capex_by_technology=None,
+    node_capex_cumulative_tech=None,
     all_nodes=(),
 ):
     """Turn the axis config lists into ordered (name, members) groups.
 
     Returns (tech_groups, carrier_groups, node_capex_groups,
     node_capex_cumulative_axes, node_capex_tech_axes,
-    node_capex_cumulative_chains): the first three are (name, [members])
+    node_capex_cumulative_chains, node_capex_cumulative_tech_axes,
+    node_capex_cumulative_tech_chains): the first three are (name, [members])
     tuples in the user's order; node_capex_cumulative_axes is a list of
     (name, [members], until_year) tuples, one per (node/node-lump,
     until_year) combination named f"{name}_until_{until_year}", iterated
@@ -80,6 +85,17 @@ def build_axis_groups(
     node/node-lump group, holding that group's generated axis names sorted
     ascending by until_year (independent of config order) -- the chains used
     to constrain cumulative-capex axes to be monotonically non-decreasing.
+    node_capex_cumulative_tech_axes is a list of (name, [node members],
+    [technology members], until_year) tuples, one per (node/node-lump,
+    technology-group, until_year) combination named
+    f"{node_name}_{tech_name}_until_{until_year}", iterated
+    nodes-major/tech-groups-middle/until-years-minor (config order);
+    node_capex_cumulative_tech_chains is a list of [name, ...] lists, one per
+    (node/node-lump, technology-group) pair, holding that pair's generated
+    axis names sorted ascending by until_year -- the chains used to
+    constrain each (node, technology-group) pair's cumulative capex to be
+    monotonically non-decreasing, without comparing across technology
+    groups.
     """
     tech_set, carrier_set, node_set = (
         set(all_technologies),
@@ -171,12 +187,71 @@ def build_axis_groups(
         for tech_name, tech_members in technology_groups
     ]
 
+    node_capex_cumulative_tech = node_capex_cumulative_tech or {}
+    cct_node_groups = _parse_axis_list(
+        node_capex_cumulative_tech.get("nodes"),
+        node_set,
+        all_names,
+        "axes.node_capex_cumulative_tech.nodes",
+    )
+    have_nodes = bool(cct_node_groups)
+    have_until_years = bool(node_capex_cumulative_tech.get("until_years"))
+    have_tech_groups = bool(node_capex_cumulative_tech.get("technology_groups"))
+    if have_nodes and not (have_until_years and have_tech_groups):
+        raise ValueError(
+            "MGA axes.node_capex_cumulative_tech: 'nodes' given without "
+            "'until_years' and/or 'technology_groups'."
+        )
+    if have_until_years and not (have_nodes and have_tech_groups):
+        raise ValueError(
+            "MGA axes.node_capex_cumulative_tech: 'until_years' given "
+            "without 'nodes' and/or 'technology_groups'."
+        )
+    if have_tech_groups and not (have_nodes and have_until_years):
+        raise ValueError(
+            "MGA axes.node_capex_cumulative_tech: 'technology_groups' given "
+            "without 'nodes' and/or 'until_years'."
+        )
+    cct_until_years = (
+        _parse_until_years_list(
+            node_capex_cumulative_tech["until_years"],
+            "axes.node_capex_cumulative_tech.until_years",
+        )
+        if have_nodes
+        else []
+    )
+    cct_tech_groups = (
+        _parse_axis_list(
+            node_capex_cumulative_tech["technology_groups"],
+            tech_set,
+            all_names,
+            "axes.node_capex_cumulative_tech.technology_groups",
+        )
+        if have_nodes
+        else []
+    )
+    node_capex_cumulative_tech_axes = [
+        (f"{node_name}_{tech_name}_until_{until_year}", node_members, tech_members, until_year)
+        for node_name, node_members in cct_node_groups
+        for tech_name, tech_members in cct_tech_groups
+        for until_year in cct_until_years
+    ]
+    node_capex_cumulative_tech_chains = [
+        [
+            f"{node_name}_{tech_name}_until_{until_year}"
+            for until_year in sorted(cct_until_years)
+        ]
+        for node_name, _ in cct_node_groups
+        for tech_name, _ in cct_tech_groups
+    ]
+
     generated_names = (
         [n for n, _ in tech_groups]
         + [n for n, _ in carrier_groups]
         + [n for n, _ in node_capex_groups]
         + [n for n, _, _ in node_capex_cumulative_axes]
         + [n for n, _, _ in node_capex_tech_axes]
+        + [n for n, _, _, _ in node_capex_cumulative_tech_axes]
     )
     duplicates = {n for n in generated_names if generated_names.count(n) > 1}
     if duplicates:
@@ -191,6 +266,8 @@ def build_axis_groups(
         node_capex_cumulative_axes,
         node_capex_tech_axes,
         node_capex_cumulative_chains,
+        node_capex_cumulative_tech_axes,
+        node_capex_cumulative_tech_chains,
     )
 
 
@@ -305,7 +382,12 @@ def axis_physical_unit(axis, units, ureg):
         found = sorted({str(u) for u in series[mask].to_numpy()})
         return " + ".join(found) if found else None
 
-    if axis.kind in (NODE_CAPEX, NODE_CAPEX_CUMULATIVE, NODE_CAPEX_TECH):
+    if axis.kind in (
+        NODE_CAPEX,
+        NODE_CAPEX_CUMULATIVE,
+        NODE_CAPEX_TECH,
+        NODE_CAPEX_CUMULATIVE_TECH,
+    ):
         series = units.get("cost_capex_yearly")
         if series is None:
             return None

@@ -28,6 +28,7 @@ from zen_garden_plugins.mga.polytope_io import (
     CARRIER_IMPORT,
     NODE_CAPEX,
     NODE_CAPEX_CUMULATIVE,
+    NODE_CAPEX_CUMULATIVE_TECH,
     NODE_CAPEX_TECH,
     TECH_CAPACITY,
     TOTAL_COST,
@@ -55,6 +56,8 @@ def test_singleton_and_lumped_axes_keep_user_order():
         node_capex_cumulative_axes,
         node_capex_tech_axes,
         node_capex_cumulative_chains,
+        node_capex_cumulative_tech_axes,
+        node_capex_cumulative_tech_chains,
     ) = build_axis_groups(
         ["nuclear", {"hydro": ["hydro_a", "hydro_b"]}],
         ["biomass"],
@@ -67,10 +70,21 @@ def test_singleton_and_lumped_axes_keep_user_order():
     assert node_capex_cumulative_axes == []
     assert node_capex_tech_axes == []
     assert node_capex_cumulative_chains == []
+    assert node_capex_cumulative_tech_axes == []
+    assert node_capex_cumulative_tech_chains == []
 
 
 def test_empty_config_yields_no_axes():
-    assert build_axis_groups(None, None, TECHS, CARRIERS) == ([], [], [], [], [], [])
+    assert build_axis_groups(None, None, TECHS, CARRIERS) == (
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
 
 
 @pytest.mark.parametrize(
@@ -102,7 +116,7 @@ def test_axis_name_cannot_be_used_twice_across_blocks():
 
 
 def test_singleton_and_lumped_node_capex_axes_keep_user_order():
-    _, _, node_capex_groups, _, _, _ = build_axis_groups(
+    _, _, node_capex_groups, _, _, _, _, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -146,7 +160,7 @@ def test_node_capex_axis_name_cannot_collide_with_tech_or_carrier_axis():
 
 
 def test_node_capex_cumulative_produces_nodes_major_until_years_minor_axes():
-    _, _, _, node_capex_cumulative_axes, _, node_capex_cumulative_chains = (
+    _, _, _, node_capex_cumulative_axes, _, node_capex_cumulative_chains, _, _ = (
         build_axis_groups(
             None,
             None,
@@ -172,7 +186,7 @@ def test_node_capex_cumulative_produces_nodes_major_until_years_minor_axes():
 
 
 def test_node_capex_cumulative_chains_are_sorted_ascending_by_until_year():
-    _, _, _, _, _, node_capex_cumulative_chains = build_axis_groups(
+    _, _, _, _, _, node_capex_cumulative_chains, _, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -215,7 +229,7 @@ def test_invalid_node_capex_cumulative_configs_are_rejected(node_capex_cumulativ
 
 
 def test_node_capex_by_technology_produces_nodes_major_tech_groups_minor_axes():
-    _, _, _, _, node_capex_tech_axes, _ = build_axis_groups(
+    _, _, _, _, node_capex_tech_axes, _, _, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -273,6 +287,139 @@ def test_node_capex_by_technology_axis_name_cannot_collide_with_node_capex_axis(
             node_capex_by_technology={
                 "nodes": ["DE"],
                 "technology_groups": [{"renewables": ["pv"]}],
+            },
+            all_nodes=NODES,
+        )
+
+
+# --------------------------------------------- node capex cumulative by tech
+
+
+def test_node_capex_cumulative_tech_produces_nodes_major_tech_middle_years_minor_axes():
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        node_capex_cumulative_tech_axes,
+        node_capex_cumulative_tech_chains,
+    ) = build_axis_groups(
+        None,
+        None,
+        TECHS,
+        CARRIERS,
+        node_capex_cumulative_tech={
+            "nodes": ["DE", {"benelux": ["BE", "NL", "LU"]}],
+            "until_years": [2030, 2040],
+            "technology_groups": [
+                {"renewables": ["pv", "hydro_a", "hydro_b"]},
+                "nuclear",
+            ],
+        },
+        all_nodes=NODES,
+    )
+    assert node_capex_cumulative_tech_axes == [
+        ("DE_renewables_until_2030", ["DE"], ["pv", "hydro_a", "hydro_b"], 2030),
+        ("DE_renewables_until_2040", ["DE"], ["pv", "hydro_a", "hydro_b"], 2040),
+        ("DE_nuclear_until_2030", ["DE"], ["nuclear"], 2030),
+        ("DE_nuclear_until_2040", ["DE"], ["nuclear"], 2040),
+        (
+            "benelux_renewables_until_2030",
+            ["BE", "NL", "LU"],
+            ["pv", "hydro_a", "hydro_b"],
+            2030,
+        ),
+        (
+            "benelux_renewables_until_2040",
+            ["BE", "NL", "LU"],
+            ["pv", "hydro_a", "hydro_b"],
+            2040,
+        ),
+        ("benelux_nuclear_until_2030", ["BE", "NL", "LU"], ["nuclear"], 2030),
+        ("benelux_nuclear_until_2040", ["BE", "NL", "LU"], ["nuclear"], 2040),
+    ]
+    # One chain per (node, technology-group) pair -- never merged across
+    # technology groups within the same node/lump group.
+    assert node_capex_cumulative_tech_chains == [
+        ["DE_renewables_until_2030", "DE_renewables_until_2040"],
+        ["DE_nuclear_until_2030", "DE_nuclear_until_2040"],
+        ["benelux_renewables_until_2030", "benelux_renewables_until_2040"],
+        ["benelux_nuclear_until_2030", "benelux_nuclear_until_2040"],
+    ]
+
+
+def test_node_capex_cumulative_tech_chains_are_sorted_ascending_by_until_year():
+    *_, node_capex_cumulative_tech_chains = build_axis_groups(
+        None,
+        None,
+        TECHS,
+        CARRIERS,
+        node_capex_cumulative_tech={
+            "nodes": ["DE"],
+            "until_years": [2050, 2030, 2040],
+            "technology_groups": ["nuclear"],
+        },
+        all_nodes=NODES,
+    )
+    assert node_capex_cumulative_tech_chains == [
+        ["DE_nuclear_until_2030", "DE_nuclear_until_2040", "DE_nuclear_until_2050"],
+    ]
+
+
+@pytest.mark.parametrize(
+    "node_capex_cumulative_tech",
+    [
+        {"nodes": ["DE"]},  # nodes without until_years/technology_groups
+        {"until_years": [2030]},  # until_years without nodes/technology_groups
+        {"technology_groups": ["nuclear"]},  # technology_groups without nodes/until_years
+        {"nodes": ["DE"], "until_years": [2030]},  # missing technology_groups
+        {"nodes": ["DE"], "technology_groups": ["nuclear"]},  # missing until_years
+        {"until_years": [2030], "technology_groups": ["nuclear"]},  # missing nodes
+        {
+            "nodes": ["typo"],
+            "until_years": [2030],
+            "technology_groups": ["nuclear"],
+        },  # unknown node
+        {
+            "nodes": ["DE"],
+            "until_years": [2030],
+            "technology_groups": ["typo"],
+        },  # unknown technology
+        {
+            "nodes": ["DE"],
+            "until_years": [2030, 2030],
+            "technology_groups": ["nuclear"],
+        },  # duplicate year
+    ],
+)
+def test_invalid_node_capex_cumulative_tech_configs_are_rejected(
+    node_capex_cumulative_tech,
+):
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_capex_cumulative_tech=node_capex_cumulative_tech,
+            all_nodes=NODES,
+        )
+
+
+def test_node_capex_cumulative_tech_axis_name_cannot_collide_with_other_capex_blocks():
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_capex=[{"DE_nuclear_until_2030": ["DE"]}],
+            node_capex_cumulative_tech={
+                "nodes": ["DE"],
+                "until_years": [2030],
+                "technology_groups": ["nuclear"],
             },
             all_nodes=NODES,
         )
@@ -381,6 +528,22 @@ def test_node_capex_axis_without_technology_restriction_sums_every_technology():
     assert float(value.sum(skipna=True)) == pytest.approx(360.0)  # 60 nuclear + 300 pv
 
 
+def test_node_capex_cumulative_tech_axis_restricts_to_both_years_and_technologies():
+    axis = Axis(
+        "DE_nuclear_until_2025",
+        NODE_CAPEX_CUMULATIVE_TECH,
+        ("DE",),
+        None,
+        period=(None, 1),
+        technologies=("nuclear",),
+    )
+    stub = _node_capex_stub({"DE_nuclear_until_2025": [0, 1]})
+    value = MGA._design_axis_terms(
+        stub, axis, None, None, capex=_capex_data_array_multi_tech()
+    )
+    assert float(value.sum(skipna=True)) == pytest.approx(30.0)  # nuclear 10+20, pv excluded
+
+
 def _capex_data_array_multi_node_multi_tech():
     """A cost_capex_yearly-shaped DataArray with two nodes ("DE", "CH") and
     two technologies ("nuclear", "pv") at each, for testing that
@@ -459,6 +622,28 @@ def test_reference_total_node_capex_tech_keeps_technology_filter():
     assert float(value.sum(skipna=True)) == pytest.approx(66.0)  # nuclear @ DE 60 + CH 6, pv excluded
 
 
+def test_reference_total_node_capex_cumulative_tech_widens_nodes_drops_period_keeps_tech():
+    # Like node_capex_tech's reference total (widen to all nodes, keep the
+    # technology filter), but additionally must ignore its own until_year --
+    # same mechanism as node_capex_cumulative's reference total.
+    axis = Axis(
+        "DE_nuclear_until_2025",
+        NODE_CAPEX_CUMULATIVE_TECH,
+        ("DE",),
+        None,
+        period=(None, 1),
+        technologies=("nuclear",),
+    )
+    stub = _reference_total_stub(
+        axis_year_indices={"DE_nuclear_until_2025": [0, 1]},
+        all_nodes=["DE", "CH"],
+    )
+    value = MGA._design_axis_reference_total(
+        stub, axis, None, None, capex=_capex_data_array_multi_node_multi_tech()
+    )
+    assert float(value.sum(skipna=True)) == pytest.approx(66.0)  # nuclear @ DE 60 + CH 6, full horizon
+
+
 def test_year_indices_in_period_is_boundary_inclusive():
     year_indices = [0, 1, 2, 3]
     real_years = [2021, 2025, 2030, 2035]
@@ -530,6 +715,11 @@ def test_valid_node_capex_config_passes():
                 },
                 "node_capex_by_technology": {
                     "nodes": ["DE"],
+                    "technology_groups": [{"renewables": ["pv", "wind"]}],
+                },
+                "node_capex_cumulative_tech": {
+                    "nodes": ["DE"],
+                    "until_years": [2030, 2040, 2050],
                     "technology_groups": [{"renewables": ["pv", "wind"]}],
                 },
             },
@@ -697,6 +887,7 @@ def test_unknown_normalisation_value_is_rejected():
         {"batch": {"batch_sizee": 8}},  # batch typo
         {"axes": {"node_capex_cumulative": {"unti_years": []}}},  # nested typo
         {"axes": {"node_capex_by_technology": {"technolgy_groups": []}}},  # nested typo
+        {"axes": {"node_capex_cumulative_tech": {"technolgy_groups": []}}},  # nested typo
     ],
 )
 def test_unknown_config_keys_are_rejected(cfg):
@@ -1198,6 +1389,19 @@ def test_node_capex_tech_axis_unit_is_masked_to_the_selected_technologies():
 
     assert axis_physical_unit(unfiltered, units, pint.UnitRegistry()) == (
         "kiloEuro + megaEuro"
+    )
+    assert axis_physical_unit(nuclear_only, units, pint.UnitRegistry()) == "megaEuro"
+
+
+def test_node_capex_cumulative_tech_axis_unit_is_masked_to_the_selected_technologies():
+    units = {"cost_capex_yearly": CAPEX_UNITS_MULTI_TECH}
+    nuclear_only = Axis(
+        "DE_nuclear_until_2030",
+        NODE_CAPEX_CUMULATIVE_TECH,
+        ("DE",),
+        None,
+        period=(None, 2030),
+        technologies=("nuclear",),
     )
     assert axis_physical_unit(nuclear_only, units, pint.UnitRegistry()) == "megaEuro"
 

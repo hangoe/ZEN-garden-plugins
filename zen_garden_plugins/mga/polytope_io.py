@@ -8,9 +8,10 @@ and therefore registers no event handlers.
 Every exploratory variable is an axis -- a technology-capacity group, a
 carrier-import group, a per-node (or per-node-lump) capex group, a per-node
 capex group restricted to all years up to a target calendar year, a per-node
-capex group restricted to a named technology group, or the total cost -- so
-all per-axis arrays share one length and one order, matching the polytope's
-columns.
+capex group restricted to a named technology group, a per-node capex group
+restricted to both a target calendar year and a named technology group at
+once, or the total cost -- so all per-axis arrays share one length and one
+order, matching the polytope's columns.
 
 Schema:
 
@@ -20,7 +21,9 @@ Schema:
     name_list       (n_axes,) str        axis names, in column order
     kinds           (n_axes,) str        tech_capacity | carrier_import |
                                          node_capex | node_capex_cumulative |
-                                         node_capex_tech | total_cost
+                                         node_capex_tech |
+                                         node_capex_cumulative_tech |
+                                         total_cost
     units           (n_axes,) str        physical unit, "" when unknown
     scale           (n_axes,)            physical = normalised * scale + offset
     offset          (n_axes,)
@@ -57,19 +60,21 @@ each reaches 1 at its near-optimal maximum; "minmax" uses scale = upper -
 lower bound, offset = lower bound, so each design axis spans exactly [0, 1]
 between its own near-optimal min and max; "units" uses scale = 1, offset =
 0, so design axes are reported in their own physical units; "share" (capex
-axes only -- node_capex, node_capex_cumulative, node_capex_tech) uses scale
-= a fixed reference total evaluated once on the baseline design z*, rounded
-to one significant figure (e.g. 12.3e6 -> 10e6, 18e12 -> 20e12), rather than
-recomputed per explored point, and offset = 0: every node_capex and
-node_capex_cumulative axis in a run shares one identical total (summed over
-every node and the full model horizon, regardless of a cumulative axis's own
-until_year), while each node_capex_tech axis instead divides by its own
-technology group's total (also summed over every node and the full
-horizon). Both the rounded total actually used and the raw, unrounded value
-it was rounded from are recorded per axis in axis_meta_json (as
-share_reference_total / share_reference_total_raw). All conventions
-normalise the cost axis identically: scale = epsilon * c_star, offset =
-c_star, so 0 is the cost optimum and 1 the near-optimality budget.
+axes only -- node_capex, node_capex_cumulative, node_capex_tech,
+node_capex_cumulative_tech) uses scale = a fixed reference total evaluated
+once on the baseline design z*, rounded to one significant figure (e.g.
+12.3e6 -> 10e6, 18e12 -> 20e12), rather than recomputed per explored point,
+and offset = 0: every node_capex and node_capex_cumulative axis in a run
+shares one identical total (summed over every node and the full model
+horizon, regardless of a cumulative axis's own until_year), while each
+node_capex_tech or node_capex_cumulative_tech axis instead divides by its
+own technology group's total (also summed over every node and the full
+horizon, regardless of the latter's own until_year). Both the rounded total
+actually used and the raw, unrounded value it was rounded from are recorded
+per axis in axis_meta_json (as share_reference_total /
+share_reference_total_raw). All conventions normalise the cost axis
+identically: scale = epsilon * c_star, offset = c_star, so 0 is the cost
+optimum and 1 the near-optimality budget.
 Which convention produced a given file is recorded in run_json. scale/offset
 are stored explicitly (rather than re-derived from bounds_phys) because they
 do not follow one rule.
@@ -87,6 +92,7 @@ CARRIER_IMPORT = "carrier_import"
 NODE_CAPEX = "node_capex"
 NODE_CAPEX_CUMULATIVE = "node_capex_cumulative"
 NODE_CAPEX_TECH = "node_capex_tech"
+NODE_CAPEX_CUMULATIVE_TECH = "node_capex_cumulative_tech"
 TOTAL_COST = "total_cost"
 
 # Every key the schema defines; save_polytope writes all of them.

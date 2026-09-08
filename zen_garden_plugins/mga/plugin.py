@@ -40,7 +40,9 @@ Glossary
                 per-node (or per-node-lump) capex group, a per-node capex
                 group restricted to an explicit calendar-year span, a
                 per-node capex group restricted to a named technology group,
-                or the total cost (see axes.py)
+                a per-node capex group restricted to both a calendar-year
+                span and a named technology group at once, or the total cost
+                (see axes.py)
     n_z         number of axes, cost included -- the dimension of the
                 explored space
     C* (c_star) the baseline (cost-optimal) net present cost
@@ -59,8 +61,9 @@ Glossary
                 (not recomputed per explored point) and offset = 0 -- every
                 NODE_CAPEX/_CUMULATIVE axis in the run shares one identical
                 total (all nodes, the full model horizon), while a
-                NODE_CAPEX_TECH axis instead divides by its own technology
-                group's total (all nodes, full horizon); both the rounded
+                NODE_CAPEX_TECH or NODE_CAPEX_CUMULATIVE_TECH axis instead
+                divides by its own technology group's total (all nodes, full
+                horizon); both the rounded
                 total and its raw, unrounded value are recorded per axis in
                 polytope_metadata(). Since that reference total is shared
                 across a group's axes rather than being each axis's own
@@ -103,6 +106,7 @@ from .polytope_io import (
     CARRIER_IMPORT,
     NODE_CAPEX,
     NODE_CAPEX_CUMULATIVE,
+    NODE_CAPEX_CUMULATIVE_TECH,
     NODE_CAPEX_TECH,
     TECH_CAPACITY,
     TOTAL_COST,
@@ -146,9 +150,15 @@ _KNOWN_KEYS = {
         "node_capex",
         "node_capex_cumulative",
         "node_capex_by_technology",
+        "node_capex_cumulative_tech",
     },
     "plugins.mga.axes.node_capex_cumulative": {"nodes", "until_years"},
     "plugins.mga.axes.node_capex_by_technology": {"nodes", "technology_groups"},
+    "plugins.mga.axes.node_capex_cumulative_tech": {
+        "nodes",
+        "until_years",
+        "technology_groups",
+    },
     "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
     "plugins.mga.oracle.max_min": {
         "formulation",
@@ -291,6 +301,10 @@ def validate_config(cfg) -> None:
             "plugins.mga.axes.node_capex_by_technology",
             cfg.get("axes", {}).get("node_capex_by_technology", {}),
         ),
+        (
+            "plugins.mga.axes.node_capex_cumulative_tech",
+            cfg.get("axes", {}).get("node_capex_cumulative_tech", {}),
+        ),
         ("plugins.mga.oracle", cfg.get("oracle", {})),
         ("plugins.mga.oracle.max_min", cfg.get("oracle", {}).get("max_min", {})),
         ("plugins.mga.sampling", cfg.get("sampling", {})),
@@ -316,9 +330,9 @@ def validate_config(cfg) -> None:
     ):
         raise ValueError(
             "MGA: normalisation='share' only supports capex axes "
-            "(node_capex / node_capex_cumulative / node_capex_by_technology); "
-            "remove axes.technologies/axes.carrier_imports or use a "
-            "different normalisation."
+            "(node_capex / node_capex_cumulative / node_capex_by_technology / "
+            "node_capex_cumulative_tech); remove axes.technologies/"
+            "axes.carrier_imports or use a different normalisation."
         )
     if cfg.get("mode") == "oracle" and normalisation in ("units", "minmax", "share"):
         raise ValueError(
@@ -362,6 +376,7 @@ class MGA:
         node_capex=None,
         node_capex_cumulative=None,
         node_capex_by_technology=None,
+        node_capex_cumulative_tech=None,
         normalisation="relative",
     ):
         """
@@ -389,6 +404,18 @@ class MGA:
                 node_capex...], "technology_groups": [...same format,
                 technology names/lumps...]}. Produces one axis per
                 (node/lump, technology-group) combination.
+            node_capex_cumulative_tech: Per-node capex axes restricted to
+                both a target calendar year and a named technology group at
+                once: {"nodes": [...same format as node_capex...],
+                "until_years": [2030, 2040, ...], "technology_groups":
+                [...same format, technology names/lumps...]}. Produces one
+                axis per (node/lump, technology-group, until_year)
+                combination, named f"{node_name}_{tech_name}_until_
+                {until_year}". Axes sharing both a node/lump group and a
+                technology group are constrained to be monotonically
+                non-decreasing across ascending until_year (see
+                build_initial_outer_approximation()); axes are never
+                compared across different technology groups.
             normalisation: "relative" (default) scales design axes by their
                 near-optimal maximum; "minmax" maps each axis's own
                 near-optimal [min, max] onto [0, 1]; "units" reports them in
@@ -398,9 +425,10 @@ class MGA:
                 one shared total across all nodes and the full model
                 horizon for every node_capex/node_capex_cumulative axis,
                 and a separate per-technology-group total (also all nodes,
-                full horizon) for node_capex_by_technology axes; both the
-                rounded total and the raw value it came from are recorded
-                per axis in polytope_metadata(). The cost axis is always
+                full horizon) for node_capex_by_technology and
+                node_capex_cumulative_tech axes; both the rounded total and
+                the raw value it came from are recorded per axis in
+                polytope_metadata(). The cost axis is always
                 budget-relative.
                 See solve_axis_bounds().
         """
@@ -434,6 +462,8 @@ class MGA:
             node_capex_cumulative_axes,
             node_capex_tech_axes,
             node_capex_cumulative_chains,
+            node_capex_cumulative_tech_axes,
+            node_capex_cumulative_tech_chains,
         ) = build_axis_groups(
             technologies,
             carrier_imports,
@@ -442,17 +472,22 @@ class MGA:
             node_capex=node_capex,
             node_capex_cumulative=node_capex_cumulative,
             node_capex_by_technology=node_capex_by_technology,
+            node_capex_cumulative_tech=node_capex_cumulative_tech,
             all_nodes=self.all_nodes,
         )
-        # Chains of cumulative-capex axis names (same node/lump group,
+        # Chains of cumulative-capex axis names (same node/lump group, and
+        # for node_capex_cumulative_tech also the same technology group,
         # ascending until_year), used by build_initial_outer_approximation
         # to add monotonicity rows; empty when there are no such axes.
-        self._monotone_capex_chains = node_capex_cumulative_chains
+        self._monotone_capex_chains = (
+            node_capex_cumulative_chains + node_capex_cumulative_tech_chains
+        )
 
         # The single source of truth for axis order everywhere downstream
         # (coordinates, cut normals, polytope columns): technology axes,
         # carrier axes, node-capex axes, node-capex-cumulative axes,
-        # node-capex-technology axes, then the cost axis.
+        # node-capex-technology axes, node-capex-cumulative-technology axes,
+        # then the cost axis.
         self.axes: list[Axis] = (
             [
                 Axis(
@@ -491,6 +526,19 @@ class MGA:
                 )
                 for name, node_members, tech_members in node_capex_tech_axes
             ]
+            + [
+                Axis(
+                    name,
+                    NODE_CAPEX_CUMULATIVE_TECH,
+                    tuple(node_members),
+                    None,
+                    period=(None, until_year),
+                    technologies=tuple(tech_members),
+                )
+                for name, node_members, tech_members, until_year in (
+                    node_capex_cumulative_tech_axes
+                )
+            ]
         )
         if include_cost:
             self.axes.append(Axis(COST_VARIABLE, TOTAL_COST, (), None))
@@ -514,7 +562,13 @@ class MGA:
         # transport technologies; .sel(set_location=<node names>) therefore
         # naturally excludes transport-technology capex (invalid entries),
         # the same mechanism the tech-capacity axis already relies on.
-        _node_kinds = (NODE_CAPEX, NODE_CAPEX_CUMULATIVE, NODE_CAPEX_TECH)
+        _node_kinds = (
+            NODE_CAPEX,
+            NODE_CAPEX_CUMULATIVE,
+            NODE_CAPEX_TECH,
+            NODE_CAPEX_CUMULATIVE_TECH,
+        )
+        _cumulative_kinds = (NODE_CAPEX_CUMULATIVE, NODE_CAPEX_CUMULATIVE_TECH)
         self._axis_year_indices: dict[str, list] = {}
         if any(axis.kind in _node_kinds for axis in self.axes):
             self.cost_capex_yearly = self.model.variables["cost_capex_yearly"]
@@ -523,7 +577,7 @@ class MGA:
             )
             real_years = list(optimization_setup.energy_system.set_time_steps_years)
             for axis in self.axes:
-                if axis.kind != NODE_CAPEX_CUMULATIVE:
+                if axis.kind not in _cumulative_kinds:
                     continue
                 ids = _year_indices_in_period(axis.period, year_indices, real_years)
                 if not ids:
@@ -591,7 +645,8 @@ class MGA:
         if self.normalisation == "share":
             # Log each distinct reference total once -- every node_capex/
             # node_capex_cumulative axis shares one, and each node_capex_tech
-            # technology group contributes its own.
+            # or node_capex_cumulative_tech technology group contributes its
+            # own.
             logged_raw = set()
             for axis, raw in zip(self.axes, self._share_reference_phys_raw):
                 if axis.kind == TOTAL_COST or raw in logged_raw:
@@ -767,7 +822,8 @@ class MGA:
         capex of the member nodes over all capacity types, over all model
         years (NODE_CAPEX) or every model year up to the axis's until_year
         (NODE_CAPEX_CUMULATIVE), and over either all technologies or just
-        the axis's technology group (NODE_CAPEX_TECH).
+        the axis's technology group (NODE_CAPEX_TECH), or both a year cutoff
+        and a technology group at once (NODE_CAPEX_CUMULATIVE_TECH).
         """
         members = list(axis.members)
         if axis.kind == TECH_CAPACITY:
@@ -780,10 +836,11 @@ class MGA:
             return (self._ts_duration * flow.sel(set_carriers=members)).sum(
                 self._CARRIER_AGG + ["set_carriers"]
             )
-        # NODE_CAPEX / NODE_CAPEX_CUMULATIVE / NODE_CAPEX_TECH: transport
-        # technologies have no valid entry at a node-named location, so they
-        # drop out of this selection for free (same mechanism as
-        # _TECH_AGG's unrestricted set_location sum for tech-capacity axes).
+        # NODE_CAPEX / NODE_CAPEX_CUMULATIVE / NODE_CAPEX_TECH /
+        # NODE_CAPEX_CUMULATIVE_TECH: transport technologies have no valid
+        # entry at a node-named location, so they drop out of this selection
+        # for free (same mechanism as _TECH_AGG's unrestricted set_location
+        # sum for tech-capacity axes).
         term = capex.sel(set_location=members)
         if axis.technologies is not None:
             term = term.sel(set_technologies=list(axis.technologies))
@@ -822,12 +879,13 @@ class MGA:
         `_axis_year_indices`, so a NODE_CAPEX_CUMULATIVE axis's own
         until_year no longer applies, and every NODE_CAPEX/_CUMULATIVE axis
         in a run shares one identical full-horizon, all-node total.
-        `axis.technologies` is left untouched, so NODE_CAPEX_TECH axes still
-        divide by their own technology group's full-horizon, all-node total,
-        not the grand total. Only called for capex-kind axes
-        (NODE_CAPEX/_CUMULATIVE/_TECH) -- normalisation="share" is rejected
-        at config-validation time for any other axis kind, including
-        TOTAL_COST.
+        `axis.technologies` is left untouched, so NODE_CAPEX_TECH and
+        NODE_CAPEX_CUMULATIVE_TECH axes still divide by their own technology
+        group's full-horizon, all-node total, not the grand total. Only
+        called for capex-kind axes
+        (NODE_CAPEX/_CUMULATIVE/_TECH/_CUMULATIVE_TECH) --
+        normalisation="share" is rejected at config-validation time for any
+        other axis kind, including TOTAL_COST.
         """
         widened = dataclasses.replace(
             axis, name="__share_reference_total__", members=tuple(self.all_nodes)
@@ -918,7 +976,7 @@ class MGA:
                     "baseline (z*) reference total; one shared total per "
                     "run for node_capex/node_capex_cumulative (all nodes, "
                     "full horizon), a separate per-technology-group total "
-                    "for node_capex_tech"
+                    "for node_capex_tech/node_capex_cumulative_tech"
                     if self.normalisation == "share"
                     else "(upper bound, 0)"
                 )
@@ -1457,6 +1515,7 @@ def run_mga(
         node_capex=axes_cfg.get("node_capex"),
         node_capex_cumulative=axes_cfg.get("node_capex_cumulative"),
         node_capex_by_technology=axes_cfg.get("node_capex_by_technology"),
+        node_capex_cumulative_tech=axes_cfg.get("node_capex_cumulative_tech"),
         normalisation=config.get("normalisation", "relative"),
     )
     mga.setup()
