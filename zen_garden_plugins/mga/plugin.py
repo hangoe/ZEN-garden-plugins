@@ -178,6 +178,7 @@ _KNOWN_KEYS = {
         "initial_bounds",
         "use_bounding_box",
         "seed_rng",
+        "track_implied_threshold",
     },
     "plugins.mga.bbo": {
         "tolerance_prob",
@@ -192,6 +193,7 @@ _KNOWN_KEYS = {
         "max_function_evaluations",
         "n_restarts",
         "optimizer_options",
+        "track_implied_threshold",
     },
     "plugins.mga.batch": {
         "tolerance_prob",
@@ -210,6 +212,7 @@ _KNOWN_KEYS = {
         "n_restarts",
         "bbo_enabled",
         "n_workers",
+        "track_implied_threshold",
     },
 }
 

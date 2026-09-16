@@ -67,6 +67,7 @@ def run_batch_mode(mga, cfg):
     max_function_evaluations = int(cfg.get("max_function_evaluations", 2000))
     n_restarts = int(cfg.get("n_restarts", 1))
     n_workers = int(cfg.get("n_workers", os.cpu_count() or 1))
+    track_implied_threshold = bool(cfg.get("track_implied_threshold", False))
 
     poly, point_origin, supplied = _setup_bounds_and_approximation(mga, "batch", initial_bounds)
 
@@ -106,6 +107,7 @@ def run_batch_mode(mga, cfg):
         max_function_evaluations=max_function_evaluations,
         n_restarts=n_restarts,
         history=True,
+        track_implied_threshold=track_implied_threshold,
         print_lv=1,
     )
 
@@ -127,6 +129,29 @@ def run_batch_mode(mga, cfg):
         )
         for entry, elapsed in zip(iteration_history, batch_support_function.times):
             entry["wall_time_seconds"] = elapsed
+        # batch_oracle records implied_threshold_history separately rather
+        # than merging it into its own iteration_history dicts (unlike
+        # ci_convergence_metric's history_fields, which supf_driver.py's
+        # iteration_history already picks up implied_threshold_for_tolerance
+        # from). Unlike wall_time_seconds above, this is NOT a strict 1:1
+        # zip: batch_oracle samples and appends to implied_threshold_history
+        # at the *start* of every iteration, before the convergence break
+        # check, so the final (converging) iteration adds one more entry to
+        # implied_threshold_history than to iteration_history -- mirroring
+        # supf_explore's own pre-point convergence check (see the comment on
+        # metric.evaluate() in _run_supf_mode above). zip() below silently
+        # drops that unmatched trailing entry, which is correct here.
+        if track_implied_threshold:
+            assert len(explorer.implied_threshold_history) in (
+                len(iteration_history),
+                len(iteration_history) + 1,
+            ), (
+                f"MGA batch: {len(iteration_history)} iteration_history entries "
+                f"but {len(explorer.implied_threshold_history)} recorded implied "
+                f"thresholds; expected the same count or one more."
+            )
+            for entry, implied_threshold in zip(iteration_history, explorer.implied_threshold_history):
+                entry["implied_threshold_for_tolerance"] = implied_threshold
         # batch_oracle has no public re-check; read its own last recorded
         # history entry instead (same staleness caveat as sampling/bbo's
         # pre-refactor check).
@@ -153,6 +178,7 @@ def run_batch_mode(mga, cfg):
             "strategy_mode": strategy_mode,
             "convergence_mode": convergence_mode,
             "n_workers": n_workers,
+            "track_implied_threshold": track_implied_threshold,
             "versions": _package_versions(),
         }
         _save_artifacts(

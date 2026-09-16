@@ -260,14 +260,23 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     * ``use_bounding_box`` (bool, default false): probe the axis-aligned
       directions first, before falling back to sampled directions.
     * ``seed_rng`` (int, default unset): seed for reproducible sampling.
+    * ``track_implied_threshold`` (bool, default false): each convergence
+      check also back-calculates, from the directions just sampled, the
+      smallest ``tolerance_explore`` that would *already* satisfy
+      ``tolerance_prob`` -- i.e. how far you'd need to relax
+      ``tolerance_explore`` to call the run converged at that iteration,
+      without re-running. Adds an ``implied_threshold_for_tolerance`` column
+      to ``diagnostics.csv`` (``None``/``NaN`` on iterations where the CI
+      lower bound never reaches ``tolerance_prob`` at any sampled gap).
 
 ``bbo`` (dict, bbo mode)
     * ``tolerance_prob``, ``max_iterations``, ``initial_bounds``,
       ``tolerance_explore``, ``n_samples``, ``alpha``, ``method``,
-      ``seed_rng``: same as sampling mode's keys of the same name -- they
-      configure the shared confidence-interval convergence check, not the
-      direction search itself. ``tolerance_explore``'s meaning likewise
-      depends on the top-level ``normalisation`` setting.
+      ``seed_rng``, ``track_implied_threshold``: same as sampling mode's
+      keys of the same name -- they configure the shared confidence-interval
+      convergence check, not the direction search itself.
+      ``tolerance_explore``'s meaning likewise depends on the top-level
+      ``normalisation`` setting.
     * ``use_bounding_box`` (bool, default false): probe the axis-aligned
       directions first, before falling back to the black-box search.
     * ``max_function_evaluations`` (int, default 2000): evaluation budget
@@ -280,7 +289,8 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
 ``batch`` (dict, batch mode)
     * ``tolerance_prob``, ``max_iterations``, ``initial_bounds``,
       ``tolerance_explore``, ``n_samples``, ``alpha``, ``method``,
-      ``seed_rng``: same as sampling mode's keys of the same name.
+      ``seed_rng``, ``track_implied_threshold``: same as sampling mode's
+      keys of the same name.
     * ``batch_size`` (int, default 4): maximum number of directions probed
       concurrently per iteration; the actual batch may be smaller if too
       few well-separated far directions are available.
@@ -535,6 +545,11 @@ progress; batch mode's records each iteration's *whole batch* of queried
 directions, points, cuts and progress in one row, since one call to the
 worker pool answers a full batch at once). In scenario runs, each scenario
 writes its own subfolder inside the summary folder.
+
+Setting ``track_implied_threshold: true`` on ``sampling``/``bbo``/``batch``
+adds an ``implied_threshold_for_tolerance`` column to ``diagnostics.csv``,
+computed during exploration from each check's already-sampled directions
+(no extra solves) -- see the ``sampling`` option above.
 
 Batch mode's convergence/gap fields carry one caveat beyond the others:
 ``batch_oracle`` (unlike ``sampling``/``bbo``'s harness) has no public

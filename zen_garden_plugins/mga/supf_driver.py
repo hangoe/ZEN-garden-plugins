@@ -161,6 +161,7 @@ def _run_supf_mode(mga, cfg, mode, exploration):
     method = cfg.get("method", "jeffreys")
     seed_rng = cfg.get("seed_rng")
     initial_bounds = cfg.get("initial_bounds", "vmm")
+    track_implied_threshold = bool(cfg.get("track_implied_threshold", False))
 
     poly, point_origin, supplied = _setup_bounds_and_approximation(mga, mode, initial_bounds)
 
@@ -175,6 +176,7 @@ def _run_supf_mode(mga, cfg, mode, exploration):
         alpha=alpha,
         method=method,
         seed_rng=seed_rng,
+        track_implied_threshold=track_implied_threshold,
         print_lv=1,
     )
     timed_support_function = _TimedCallback(mga.support_function)
@@ -239,6 +241,7 @@ def _run_supf_mode(mga, cfg, mode, exploration):
             "max_iterations": max_iterations,
             "iterations_done": 0 if iteration_history is None else len(iteration_history),
             "initial_bounds": "vmm" if supplied is None else "supplied",
+            "track_implied_threshold": track_implied_threshold,
             "versions": _package_versions(),
         }
         _save_artifacts(
