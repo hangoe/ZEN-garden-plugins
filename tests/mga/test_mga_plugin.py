@@ -19,6 +19,7 @@ from zen_garden_plugins.mga.batch_driver import run_batch_mode
 from zen_garden_plugins.mga.oracle_driver import run_oracle_mode
 from zen_garden_plugins.mga.plugin import (
     MGA,
+    _capex_npc_discount_factors,
     _round_to_one_significant_figure,
     _year_indices_in_period,
     normalise_rows,
@@ -455,10 +456,20 @@ def _capex_data_array():
     )
 
 
-def _node_capex_stub(axis_year_indices=None):
+def _node_capex_stub(axis_year_indices=None, capex_discount_factor=None):
+    if capex_discount_factor is None:
+        # Neutral (no-op) factor by default, over _capex_data_array()'s own
+        # year coordinate, so existing undiscounted-sum assertions still
+        # hold unless a test opts into a real factor.
+        capex_discount_factor = xr.DataArray(
+            [1.0, 1.0, 1.0],
+            dims=["set_time_steps_yearly"],
+            coords={"set_time_steps_yearly": [0, 1, 2]},
+        )
     return SimpleNamespace(
         _axis_year_indices=axis_year_indices or {},
         _NODE_AGG_CAPEX=MGA._NODE_AGG_CAPEX,
+        _capex_discount_factor=capex_discount_factor,
     )
 
 
@@ -483,6 +494,51 @@ def test_node_capex_cumulative_axis_restricts_to_years_up_to_until_year():
     stub = _node_capex_stub({"DE_until_2030": [0, 1]})
     value = MGA._design_axis_terms(stub, axis, None, None, capex=_capex_data_array())
     assert float(value.sum(skipna=True)) == pytest.approx(30.0)  # 10+20
+
+
+def test_node_capex_axis_applies_discount_factor():
+    """A non-trivial _capex_discount_factor weights each sampled year's
+    capex before summing, instead of the old plain undiscounted sum."""
+    factor = xr.DataArray(
+        [1.0, 2.0, 4.0],
+        dims=["set_time_steps_yearly"],
+        coords={"set_time_steps_yearly": [0, 1, 2]},
+    )
+    axis = Axis("DE", NODE_CAPEX, ("DE",), None)
+    stub = _node_capex_stub(capex_discount_factor=factor)
+    value = MGA._design_axis_terms(stub, axis, None, None, capex=_capex_data_array())
+    assert float(value.sum(skipna=True)) == pytest.approx(170.0)  # 10*1 + 20*2 + 30*4
+
+
+def test_node_capex_cumulative_axis_applies_discount_factor_within_its_year_window():
+    """The discount factor still applies after the until_year restriction
+    narrows the year window, using each selected year's own factor."""
+    factor = xr.DataArray(
+        [1.0, 2.0, 4.0],
+        dims=["set_time_steps_yearly"],
+        coords={"set_time_steps_yearly": [0, 1, 2]},
+    )
+    axis = Axis("DE_until_2030", NODE_CAPEX_CUMULATIVE, ("DE",), None, period=(None, 1))
+    stub = _node_capex_stub({"DE_until_2030": [0, 1]}, capex_discount_factor=factor)
+    value = MGA._design_axis_terms(stub, axis, None, None, capex=_capex_data_array())
+    assert float(value.sum(skipna=True)) == pytest.approx(50.0)  # 10*1 + 20*2 (year 2's 30 excluded)
+
+
+def test_capex_npc_discount_factors_matches_constraint_net_present_cost_formula():
+    """Hand-computed against constraint_net_present_cost's own formula
+    (energy_system.py): 3 sampled years, interval_between_years=2,
+    discount_rate=0.1, last year (index 2) gets n=1 (no extrapolation past
+    the horizon), the other two get n=interval_between_years=2."""
+    factors = _capex_npc_discount_factors(
+        year_indices=[0, 1, 2], discount_rate=0.1, interval_between_years=2, last_year_index=2
+    )
+    r = 1.0 / 1.1
+    expected = [
+        r**0 + r**1,  # year 0: i in range(2)
+        r**2 + r**3,  # year 1: i in range(2)
+        r**4,  # year 2 (last): i in range(1) only
+    ]
+    assert list(factors.values) == pytest.approx(expected)
 
 
 def _capex_data_array_multi_tech():
@@ -573,14 +629,21 @@ def _capex_data_array_multi_node_multi_tech():
     )
 
 
-def _reference_total_stub(axis_year_indices=None, all_nodes=None):
+def _reference_total_stub(axis_year_indices=None, all_nodes=None, capex_discount_factor=None):
     """Same shape as _node_capex_stub(), plus what
     _design_axis_reference_total additionally needs: all_nodes to widen
     into, and a self-bound _design_axis_terms to delegate to (mirroring how
     MGA.__init__ builds a real instance)."""
+    if capex_discount_factor is None:
+        capex_discount_factor = xr.DataArray(
+            [1.0, 1.0, 1.0],
+            dims=["set_time_steps_yearly"],
+            coords={"set_time_steps_yearly": [0, 1, 2]},
+        )
     stub = SimpleNamespace(
         _axis_year_indices=axis_year_indices or {},
         _NODE_AGG_CAPEX=MGA._NODE_AGG_CAPEX,
+        _capex_discount_factor=capex_discount_factor,
         all_nodes=all_nodes or [],
     )
     stub._design_axis_terms = functools.partial(MGA._design_axis_terms, stub)

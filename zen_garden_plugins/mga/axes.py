@@ -40,8 +40,12 @@ class Axis:
     until_year); NODE_CAPEX_TECH axes do the same but restricted to the
     member technologies in `technologies`; NODE_CAPEX_CUMULATIVE_TECH axes
     combine both restrictions at once (`period` and `technologies` both
-    set); the single TOTAL_COST axis is the model's net present cost and has
-    no members. capacity_type is the "+"-joined selected type(s) for tech
+    set); every node-capex kind weights each sampled year's capex by the
+    same discount/interval-expansion factor ZEN-garden's own
+    net_present_cost uses (see plugin.py's _capex_npc_discount_factors), so
+    it is on the same accounting basis as the single TOTAL_COST axis, which
+    is the model's net present cost and has no members. capacity_type is
+    the "+"-joined selected type(s) for tech
     axes and None otherwise. period is (None, until_year) for
     NODE_CAPEX_CUMULATIVE and NODE_CAPEX_CUMULATIVE_TECH axes -- the leading
     None means "no lower bound, from the first model year" -- and None

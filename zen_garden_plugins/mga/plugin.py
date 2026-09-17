@@ -255,6 +255,33 @@ def _year_indices_in_period(period, year_indices, real_years):
     ]
 
 
+def _capex_npc_discount_factors(
+    year_indices, discount_rate: float, interval_between_years: int, last_year_index: int
+) -> "xr.DataArray":
+    """Per-sampled-year discount factor, indexed by set_time_steps_yearly,
+    reproducing ZEN-garden's own constraint_net_present_cost formula
+    (energy_system.py) exactly -- so a node-capex axis can be discounted the
+    same way net_present_cost itself is.
+
+    factor[y] = sum_{i=0}^{n-1} (1/(1+discount_rate)) ** (interval_between_years*(y-y0) + i)
+
+    where n = 1 for the final sampled year (no extrapolation past the
+    horizon, matching constraint_net_present_cost's own last-year special
+    case), else n = interval_between_years; y0 = year_indices[0].
+    """
+    y0 = year_indices[0]
+    factors = []
+    for y in year_indices:
+        n = 1 if y == last_year_index else interval_between_years
+        factors.append(sum(
+            (1.0 / (1.0 + discount_rate)) ** (interval_between_years * (y - y0) + i)
+            for i in range(n)
+        ))
+    return xr.DataArray(
+        factors, dims=["set_time_steps_yearly"], coords={"set_time_steps_yearly": year_indices}
+    )
+
+
 def _round_to_one_significant_figure(value: float) -> float:
     """Round a positive value to one significant figure, nearest -- e.g.
     12.3e6 -> 1e7 (10e6), 18e12 -> 2e13 (20e12). Leaves non-positive or
@@ -579,6 +606,19 @@ class MGA:
                 self.cost_capex_yearly.coords["set_time_steps_yearly"].values
             )
             real_years = list(optimization_setup.energy_system.set_time_steps_years)
+            # Discount + interval-expand each sampled year's capex the same
+            # way net_present_cost itself is (constraint_net_present_cost in
+            # energy_system.py) -- otherwise this axis sums each sampled
+            # year's capex once, undiscounted, while net_present_cost counts
+            # it interval_between_years times (once per real calendar year it
+            # represents) and discounts each occurrence, making the two
+            # non-comparable. Applied in _design_axis_terms.
+            self._capex_discount_factor = _capex_npc_discount_factors(
+                year_indices,
+                float(optimization_setup.parameters.discount_rate),
+                int(optimization_setup.system.interval_between_years),
+                int(optimization_setup.energy_system.set_time_steps_yearly_entire_horizon[-1]),
+            )
             for axis in self.axes:
                 if axis.kind not in _cumulative_kinds:
                     continue
@@ -593,6 +633,7 @@ class MGA:
                 self._axis_year_indices[axis.name] = ids
         else:
             self.cost_capex_yearly = None
+            self._capex_discount_factor = None
 
         # Normalisation convention used by solve_axis_bounds(); the
         # scale/offset it computes below are set once and derived from this.
@@ -826,7 +867,12 @@ class MGA:
         years (NODE_CAPEX) or every model year up to the axis's until_year
         (NODE_CAPEX_CUMULATIVE), and over either all technologies or just
         the axis's technology group (NODE_CAPEX_TECH), or both a year cutoff
-        and a technology group at once (NODE_CAPEX_CUMULATIVE_TECH).
+        and a technology group at once (NODE_CAPEX_CUMULATIVE_TECH). Every
+        node-capex kind weights each sampled year's capex by
+        `_capex_discount_factor` before summing, reproducing ZEN-garden's own
+        net_present_cost discounting/interval-expansion (see
+        _capex_npc_discount_factors) so this axis is on the same accounting
+        basis as the TOTAL_COST axis.
         """
         members = list(axis.members)
         if axis.kind == TECH_CAPACITY:
@@ -850,6 +896,11 @@ class MGA:
         year_ids = self._axis_year_indices.get(axis.name)
         if year_ids is not None:
             term = term.sel(set_time_steps_yearly=year_ids)
+        # Discount/interval-expand each sampled year's capex the same way
+        # net_present_cost is (see __init__'s _capex_discount_factor); xarray
+        # aligns term's (possibly year-restricted) set_time_steps_yearly
+        # coordinate against the factor automatically.
+        term = term * self._capex_discount_factor
         return term.sum(self._NODE_AGG_CAPEX + ["set_location"])
 
     def axis_expression(self, axis: Axis):
