@@ -1221,7 +1221,7 @@ class MGA:
             year_ids = self._axis_year_indices[axis.name]
             term = term.sel(set_time_steps_yearly=year_ids)
             term = term * self._emissions_interval_factor
-            return term.sum(["set_technologies", "set_location"])
+            return term.sum(["set_technologies", "set_location", "set_time_steps_yearly"])
         # NODE_CAPEX / NODE_CAPEX_CUMULATIVE / NODE_CAPEX_TECH /
         # NODE_CAPEX_CUMULATIVE_TECH: transport technologies have no valid
         # entry at a node-named location, so they drop out of this selection
