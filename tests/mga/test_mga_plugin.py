@@ -19,18 +19,20 @@ from zen_garden_plugins.mga.batch_driver import run_batch_mode
 from zen_garden_plugins.mga.oracle_driver import run_oracle_mode
 from zen_garden_plugins.mga.plugin import (
     MGA,
-    _capex_npc_discount_factors,
     _round_to_one_significant_figure,
     _year_indices_in_period,
+    _year_interval_expansion_factors,
     normalise_rows,
     validate_config,
 )
 from zen_garden_plugins.mga.polytope_io import (
     CARRIER_IMPORT,
+    NODE_CAPACITY_RATIO,
     NODE_CAPEX,
     NODE_CAPEX_CUMULATIVE,
     NODE_CAPEX_CUMULATIVE_TECH,
     NODE_CAPEX_TECH,
+    NODE_CARBON_EMISSIONS_CUMULATIVE,
     TECH_CAPACITY,
     TOTAL_COST,
     Polytope,
@@ -59,6 +61,9 @@ def test_singleton_and_lumped_axes_keep_user_order():
         node_capex_cumulative_chains,
         node_capex_cumulative_tech_axes,
         node_capex_cumulative_tech_chains,
+        node_capacity_ratio_axes,
+        node_carbon_emissions_cumulative_axes,
+        node_carbon_emissions_cumulative_chains,
     ) = build_axis_groups(
         ["nuclear", {"hydro": ["hydro_a", "hydro_b"]}],
         ["biomass"],
@@ -73,10 +78,16 @@ def test_singleton_and_lumped_axes_keep_user_order():
     assert node_capex_cumulative_chains == []
     assert node_capex_cumulative_tech_axes == []
     assert node_capex_cumulative_tech_chains == []
+    assert node_capacity_ratio_axes == []
+    assert node_carbon_emissions_cumulative_axes == []
+    assert node_carbon_emissions_cumulative_chains == []
 
 
 def test_empty_config_yields_no_axes():
     assert build_axis_groups(None, None, TECHS, CARRIERS) == (
+        [],
+        [],
+        [],
         [],
         [],
         [],
@@ -117,7 +128,7 @@ def test_axis_name_cannot_be_used_twice_across_blocks():
 
 
 def test_singleton_and_lumped_node_capex_axes_keep_user_order():
-    _, _, node_capex_groups, _, _, _, _, _ = build_axis_groups(
+    _, _, node_capex_groups, _, _, _, _, _, _, _, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -161,7 +172,7 @@ def test_node_capex_axis_name_cannot_collide_with_tech_or_carrier_axis():
 
 
 def test_node_capex_cumulative_produces_nodes_major_until_years_minor_axes():
-    _, _, _, node_capex_cumulative_axes, _, node_capex_cumulative_chains, _, _ = (
+    _, _, _, node_capex_cumulative_axes, _, node_capex_cumulative_chains, _, _, _, _, _ = (
         build_axis_groups(
             None,
             None,
@@ -187,7 +198,7 @@ def test_node_capex_cumulative_produces_nodes_major_until_years_minor_axes():
 
 
 def test_node_capex_cumulative_chains_are_sorted_ascending_by_until_year():
-    _, _, _, _, _, node_capex_cumulative_chains, _, _ = build_axis_groups(
+    _, _, _, _, _, node_capex_cumulative_chains, _, _, _, _, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -230,7 +241,7 @@ def test_invalid_node_capex_cumulative_configs_are_rejected(node_capex_cumulativ
 
 
 def test_node_capex_by_technology_produces_nodes_major_tech_groups_minor_axes():
-    _, _, _, _, node_capex_tech_axes, _, _, _ = build_axis_groups(
+    _, _, _, _, node_capex_tech_axes, _, _, _, _, _, _ = build_axis_groups(
         None,
         None,
         TECHS,
@@ -306,6 +317,9 @@ def test_node_capex_cumulative_tech_produces_nodes_major_tech_middle_years_minor
         _,
         node_capex_cumulative_tech_axes,
         node_capex_cumulative_tech_chains,
+        _,
+        _,
+        _,
     ) = build_axis_groups(
         None,
         None,
@@ -352,7 +366,19 @@ def test_node_capex_cumulative_tech_produces_nodes_major_tech_middle_years_minor
 
 
 def test_node_capex_cumulative_tech_chains_are_sorted_ascending_by_until_year():
-    *_, node_capex_cumulative_tech_chains = build_axis_groups(
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        node_capex_cumulative_tech_chains,
+        _,
+        _,
+        _,
+    ) = build_axis_groups(
         None,
         None,
         TECHS,
@@ -422,6 +448,284 @@ def test_node_capex_cumulative_tech_axis_name_cannot_collide_with_other_capex_bl
                 "until_years": [2030],
                 "technology_groups": ["nuclear"],
             },
+            all_nodes=NODES,
+        )
+
+
+# --------------------------------------------------------- node capacity ratio
+
+
+def test_node_capacity_ratio_produces_nodes_major_ratio_groups_middle_years_minor_axes():
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        node_capacity_ratio_axes,
+        _,
+        _,
+    ) = build_axis_groups(
+        None,
+        None,
+        TECHS,
+        CARRIERS,
+        node_capacity_ratio={
+            "nodes": ["DE", {"benelux": ["BE", "NL", "LU"]}],
+            "years": [2030, 2040],
+            "ratio_groups": [
+                {"renewables": {
+                    "numerator": ["pv", "hydro_a"],
+                    "denominator": ["pv", "hydro_a", "nuclear"],
+                }},
+                {"hydro": {"numerator": ["hydro_a", "hydro_b"], "denominator": ["hydro_a", "hydro_b"]}},
+            ],
+        },
+        all_nodes=NODES,
+    )
+    assert node_capacity_ratio_axes == [
+        ("DE_renewables_2030", ["DE"], ["pv", "hydro_a"], ["pv", "hydro_a", "nuclear"], 2030),
+        ("DE_renewables_2040", ["DE"], ["pv", "hydro_a"], ["pv", "hydro_a", "nuclear"], 2040),
+        ("DE_hydro_2030", ["DE"], ["hydro_a", "hydro_b"], ["hydro_a", "hydro_b"], 2030),
+        ("DE_hydro_2040", ["DE"], ["hydro_a", "hydro_b"], ["hydro_a", "hydro_b"], 2040),
+        (
+            "benelux_renewables_2030",
+            ["BE", "NL", "LU"],
+            ["pv", "hydro_a"],
+            ["pv", "hydro_a", "nuclear"],
+            2030,
+        ),
+        (
+            "benelux_renewables_2040",
+            ["BE", "NL", "LU"],
+            ["pv", "hydro_a"],
+            ["pv", "hydro_a", "nuclear"],
+            2040,
+        ),
+        (
+            "benelux_hydro_2030",
+            ["BE", "NL", "LU"],
+            ["hydro_a", "hydro_b"],
+            ["hydro_a", "hydro_b"],
+            2030,
+        ),
+        (
+            "benelux_hydro_2040",
+            ["BE", "NL", "LU"],
+            ["hydro_a", "hydro_b"],
+            ["hydro_a", "hydro_b"],
+            2040,
+        ),
+    ]
+
+
+def test_node_capacity_ratio_numerator_overlapping_denominator_is_allowed():
+    # Unlike _parse_axis_list's cross-axis exclusivity, a numerator
+    # technology appearing in its own denominator is the expected, normal
+    # case for a capacity-share axis.
+    _, _, _, _, _, _, _, _, node_capacity_ratio_axes, _, _ = build_axis_groups(
+        None,
+        None,
+        TECHS,
+        CARRIERS,
+        node_capacity_ratio={
+            "nodes": ["DE"],
+            "years": [2030],
+            "ratio_groups": [
+                {"g": {"numerator": ["pv"], "denominator": ["pv", "nuclear"]}}
+            ],
+        },
+        all_nodes=NODES,
+    )
+    assert node_capacity_ratio_axes == [("DE_g_2030", ["DE"], ["pv"], ["pv", "nuclear"], 2030)]
+
+
+@pytest.mark.parametrize(
+    "node_capacity_ratio",
+    [
+        {"nodes": ["DE"]},  # nodes without years/ratio_groups
+        {"years": [2030]},  # years without nodes/ratio_groups
+        {"ratio_groups": [{"g": {"numerator": ["pv"], "denominator": ["pv"]}}]},
+        {"nodes": ["DE"], "years": [2030]},  # missing ratio_groups
+        {"nodes": ["DE"], "ratio_groups": [{"g": {"numerator": ["pv"], "denominator": ["pv"]}}]},  # missing years
+        {"years": [2030], "ratio_groups": [{"g": {"numerator": ["pv"], "denominator": ["pv"]}}]},  # missing nodes
+        {
+            "nodes": ["typo"],
+            "years": [2030],
+            "ratio_groups": [{"g": {"numerator": ["pv"], "denominator": ["pv"]}}],
+        },  # unknown node
+        {
+            "nodes": ["DE"],
+            "years": [2030],
+            "ratio_groups": [{"g": {"numerator": ["typo"], "denominator": ["pv"]}}],
+        },  # unknown numerator technology
+        {
+            "nodes": ["DE"],
+            "years": [2030],
+            "ratio_groups": [{"g": {"numerator": ["pv"], "denominator": ["typo"]}}],
+        },  # unknown denominator technology
+        {
+            "nodes": ["DE"],
+            "years": [2030],
+            "ratio_groups": [{"g": {"numerator": ["pv"]}}],
+        },  # missing denominator key
+        {
+            "nodes": ["DE"],
+            "years": [2030],
+            "ratio_groups": [{"g": {"numerator": [], "denominator": ["pv"]}}],
+        },  # empty numerator list
+        {
+            "nodes": ["DE"],
+            "years": [2030, 2030],
+            "ratio_groups": [{"g": {"numerator": ["pv"], "denominator": ["pv"]}}],
+        },  # duplicate year
+        {
+            "nodes": ["DE"],
+            "years": [2030],
+            "ratio_groups": [
+                {"g": {"numerator": ["pv"], "denominator": ["pv"]}},
+                {"g": {"numerator": ["nuclear"], "denominator": ["nuclear"]}},
+            ],
+        },  # duplicate ratio-group name
+    ],
+)
+def test_invalid_node_capacity_ratio_configs_are_rejected(node_capacity_ratio):
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_capacity_ratio=node_capacity_ratio,
+            all_nodes=NODES,
+        )
+
+
+def test_node_capacity_ratio_axis_name_cannot_collide_with_other_blocks():
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_capex=[{"DE_g_2030": ["DE"]}],
+            node_capacity_ratio={
+                "nodes": ["DE"],
+                "years": [2030],
+                "ratio_groups": [
+                    {"g": {"numerator": ["pv"], "denominator": ["pv"]}}
+                ],
+            },
+            all_nodes=NODES,
+        )
+
+
+# ---------------------------------------------- node carbon emissions cumulative
+
+
+def test_node_carbon_emissions_cumulative_produces_nodes_major_until_years_minor_axes():
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        node_carbon_emissions_cumulative_axes,
+        node_carbon_emissions_cumulative_chains,
+    ) = build_axis_groups(
+        None,
+        None,
+        TECHS,
+        CARRIERS,
+        node_carbon_emissions_cumulative={
+            "nodes": ["DE", {"benelux": ["BE", "NL", "LU"]}],
+            "until_years": [2030, 2040],
+        },
+        all_nodes=NODES,
+    )
+    assert node_carbon_emissions_cumulative_axes == [
+        ("DE_until_2030", ["DE"], 2030),
+        ("DE_until_2040", ["DE"], 2040),
+        ("benelux_until_2030", ["BE", "NL", "LU"], 2030),
+        ("benelux_until_2040", ["BE", "NL", "LU"], 2040),
+    ]
+    assert node_carbon_emissions_cumulative_chains == [
+        ["DE_until_2030", "DE_until_2040"],
+        ["benelux_until_2030", "benelux_until_2040"],
+    ]
+
+
+def test_node_carbon_emissions_cumulative_chains_are_sorted_ascending_by_until_year():
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        node_carbon_emissions_cumulative_chains,
+    ) = build_axis_groups(
+        None,
+        None,
+        TECHS,
+        CARRIERS,
+        node_carbon_emissions_cumulative={
+            "nodes": ["DE"],
+            "until_years": [2050, 2030, 2040],
+        },
+        all_nodes=NODES,
+    )
+    assert node_carbon_emissions_cumulative_chains == [
+        ["DE_until_2030", "DE_until_2040", "DE_until_2050"],
+    ]
+
+
+@pytest.mark.parametrize(
+    "node_carbon_emissions_cumulative",
+    [
+        {"nodes": ["DE"]},  # nodes without until_years
+        {"until_years": [2030]},  # until_years without nodes
+        {"nodes": ["DE"], "until_years": []},  # empty until_years list
+        {"nodes": ["DE"], "until_years": [2030.5]},  # non-int year
+        {"nodes": ["DE"], "until_years": [2030, 2030]},  # duplicate year
+    ],
+)
+def test_invalid_node_carbon_emissions_cumulative_configs_are_rejected(
+    node_carbon_emissions_cumulative,
+):
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_carbon_emissions_cumulative=node_carbon_emissions_cumulative,
+            all_nodes=NODES,
+        )
+
+
+def test_node_carbon_emissions_cumulative_axis_name_cannot_collide_with_node_capex_cumulative():
+    # Same {name}_until_{year} naming scheme as node_capex_cumulative -- the
+    # existing cross-block generated_names duplicate check must catch reuse.
+    with pytest.raises(ValueError):
+        build_axis_groups(
+            None,
+            None,
+            TECHS,
+            CARRIERS,
+            node_capex_cumulative={"nodes": ["DE"], "until_years": [2030]},
+            node_carbon_emissions_cumulative={"nodes": ["DE"], "until_years": [2030]},
             all_nodes=NODES,
         )
 
@@ -524,12 +828,12 @@ def test_node_capex_cumulative_axis_applies_discount_factor_within_its_year_wind
     assert float(value.sum(skipna=True)) == pytest.approx(50.0)  # 10*1 + 20*2 (year 2's 30 excluded)
 
 
-def test_capex_npc_discount_factors_matches_constraint_net_present_cost_formula():
+def test_year_interval_expansion_factors_matches_constraint_net_present_cost_formula():
     """Hand-computed against constraint_net_present_cost's own formula
     (energy_system.py): 3 sampled years, interval_between_years=2,
     discount_rate=0.1, last year (index 2) gets n=1 (no extrapolation past
     the horizon), the other two get n=interval_between_years=2."""
-    factors = _capex_npc_discount_factors(
+    factors = _year_interval_expansion_factors(
         year_indices=[0, 1, 2], discount_rate=0.1, interval_between_years=2, last_year_index=2
     )
     r = 1.0 / 1.1
@@ -539,6 +843,17 @@ def test_capex_npc_discount_factors_matches_constraint_net_present_cost_formula(
         r**4,  # year 2 (last): i in range(1) only
     ]
     assert list(factors.values) == pytest.approx(expected)
+
+
+def test_year_interval_expansion_factors_with_zero_discount_rate_is_plain_interval_count():
+    """discount_rate=0.0 collapses every term to 1, so factor[y] = n -- the
+    plain interval multiplicity ZEN-garden's own
+    constraint_carbon_emissions_cumulative uses (undiscounted), which is
+    what the node-carbon-emissions-cumulative axis needs."""
+    factors = _year_interval_expansion_factors(
+        year_indices=[0, 1, 2], discount_rate=0.0, interval_between_years=2, last_year_index=2
+    )
+    assert list(factors.values) == pytest.approx([2.0, 2.0, 1.0])
 
 
 def _capex_data_array_multi_tech():
@@ -707,6 +1022,206 @@ def test_reference_total_node_capex_cumulative_tech_widens_nodes_drops_period_ke
     assert float(value.sum(skipna=True)) == pytest.approx(66.0)  # nuclear @ DE 60 + CH 6, full horizon
 
 
+def _emissions_data_array():
+    """A carbon_emissions_technology_yearly-shaped DataArray (technology,
+    location, yearly): same shape/values as _capex_data_array(), so the
+    same transport-drop-out/node-lumping/until_year assertions carry over
+    directly."""
+    coords = {
+        "set_technologies": ["nuclear", "transport_ab"],
+        "set_location": ["DE", "CH", "AB"],
+        "set_time_steps_yearly": [0, 1, 2],
+    }
+    data = np.full((2, 3, 3), np.nan)
+    data[0, 0, :] = [10.0, 20.0, 30.0]  # nuclear @ DE, years 0/1/2
+    data[0, 1, :] = [5.0, 5.0, 5.0]  # nuclear @ CH, years 0/1/2
+    data[1, 2, :] = [100.0, 100.0, 100.0]  # transport_ab @ edge AB
+    return xr.DataArray(
+        data,
+        dims=["set_technologies", "set_location", "set_time_steps_yearly"],
+        coords=coords,
+    )
+
+
+def _emissions_stub(axis_year_indices=None, emissions_interval_factor=None):
+    if emissions_interval_factor is None:
+        emissions_interval_factor = xr.DataArray(
+            [1.0, 1.0, 1.0],
+            dims=["set_time_steps_yearly"],
+            coords={"set_time_steps_yearly": [0, 1, 2]},
+        )
+    return SimpleNamespace(
+        _axis_year_indices=axis_year_indices or {},
+        _emissions_interval_factor=emissions_interval_factor,
+    )
+
+
+def test_node_carbon_emissions_cumulative_axis_restricts_to_years_and_drops_transport():
+    axis = Axis("DE_until_2030", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE",), None, period=(None, 1))
+    stub = _emissions_stub({"DE_until_2030": [0, 1]})
+    value = MGA._design_axis_terms(stub, axis, None, None, emissions=_emissions_data_array())
+    assert float(value.sum(skipna=True)) == pytest.approx(30.0)  # 10+20, year 2 (30) excluded
+
+
+def test_node_carbon_emissions_cumulative_axis_lumps_multiple_nodes():
+    axis = Axis("DE_CH_until_2050", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE", "CH"), None, period=(None, 2))
+    stub = _emissions_stub({"DE_CH_until_2050": [0, 1, 2]})
+    value = MGA._design_axis_terms(stub, axis, None, None, emissions=_emissions_data_array())
+    assert float(value.sum(skipna=True)) == pytest.approx(75.0)  # (10+20+30) + (5+5+5)
+
+
+def test_node_carbon_emissions_cumulative_axis_applies_interval_expansion_factor():
+    factor = xr.DataArray(
+        [1.0, 2.0, 4.0],
+        dims=["set_time_steps_yearly"],
+        coords={"set_time_steps_yearly": [0, 1, 2]},
+    )
+    axis = Axis("DE_until_2050", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE",), None, period=(None, 2))
+    stub = _emissions_stub({"DE_until_2050": [0, 1, 2]}, emissions_interval_factor=factor)
+    value = MGA._design_axis_terms(stub, axis, None, None, emissions=_emissions_data_array())
+    assert float(value.sum(skipna=True)) == pytest.approx(170.0)  # 10*1 + 20*2 + 30*4
+
+
+# ------------------------------------------------------------ node capacity ratio
+
+
+def _capacity_stock_data_array():
+    """A capacity-shaped DataArray (technology, capacity_type, location,
+    yearly): "pv"/"nuclear" both installed at "DE" and "CH", used as both
+    the numerator source and the source for the frozen denominator
+    baseline; "wind" is present in the technology set but has zero
+    capacity everywhere, for testing the non-positive-baseline guard
+    without tripping an unrelated xarray "label not found" error."""
+    coords = {
+        "set_technologies": ["pv", "nuclear", "wind"],
+        "set_capacity_types": ["power"],
+        "set_location": ["DE", "CH"],
+        "set_time_steps_yearly": [0, 1],
+    }
+    data = np.zeros((3, 1, 2, 2))
+    data[0, 0, 0, :] = [30.0, 40.0]  # pv @ DE, years 0/1
+    data[0, 0, 1, :] = [3.0, 4.0]  # pv @ CH, years 0/1
+    data[1, 0, 0, :] = [70.0, 60.0]  # nuclear @ DE, years 0/1
+    data[1, 0, 1, :] = [7.0, 6.0]  # nuclear @ CH, years 0/1
+    # wind stays all zero
+    return xr.DataArray(
+        data,
+        dims=["set_technologies", "set_capacity_types", "set_location", "set_time_steps_yearly"],
+        coords=coords,
+    )
+
+
+def _all_ones_capacity_mask(data_array):
+    return xr.ones_like(data_array.isel(set_location=0, set_time_steps_yearly=0, drop=True))
+
+
+def _ratio_stub(axis_year_indices, ratio_denominator_baseline, capacity_mask=None):
+    return SimpleNamespace(
+        _axis_year_indices=axis_year_indices,
+        _capacity_mask=capacity_mask
+        if capacity_mask is not None
+        else _all_ones_capacity_mask(_capacity_stock_data_array()),
+        _ratio_denominator_baseline=ratio_denominator_baseline,
+    )
+
+
+def test_node_capacity_ratio_axis_divides_numerator_by_frozen_denominator_baseline():
+    axis = Axis(
+        "DE_g_2030",
+        NODE_CAPACITY_RATIO,
+        ("DE",),
+        "power",
+        period=(1, 1),
+        technologies=("pv",),
+        denominator_technologies=("pv", "nuclear"),
+    )
+    stub = _ratio_stub({"DE_g_2030": [1]}, {"DE_g_2030": 100.0})
+    value = MGA._design_axis_terms(
+        stub, axis, None, None, capacity_stock=_capacity_stock_data_array()
+    )
+    assert float(value) == pytest.approx(0.4)  # pv@DE year1 = 40, / frozen baseline 100
+
+
+def test_node_capacity_ratio_axis_is_unaffected_by_capacity_at_other_years():
+    axis = Axis(
+        "DE_g_2030",
+        NODE_CAPACITY_RATIO,
+        ("DE",),
+        "power",
+        period=(0, 0),
+        technologies=("pv",),
+        denominator_technologies=("pv", "nuclear"),
+    )
+    stub = _ratio_stub({"DE_g_2030": [0]}, {"DE_g_2030": 100.0})
+    value = MGA._design_axis_terms(
+        stub, axis, None, None, capacity_stock=_capacity_stock_data_array()
+    )
+    assert float(value) == pytest.approx(0.3)  # pv@DE year0 = 30, not year1's 40
+
+
+def _capacity_ratio_baseline_stub(capacity_mask=None):
+    return SimpleNamespace(
+        _axis_year_indices={"DE_g_2030": [1]},
+        _capacity_mask=capacity_mask
+        if capacity_mask is not None
+        else _all_ones_capacity_mask(_capacity_stock_data_array()),
+        capacity=SimpleNamespace(solution=_capacity_stock_data_array()),
+    )
+
+
+def test_capacity_ratio_denominator_baseline_stays_scoped_to_own_node_and_year():
+    # Unlike normalisation="share"'s reference total, this must NOT widen to
+    # all nodes -- it is a per-axis frozen baseline for this axis's own
+    # region/year only.
+    axis = Axis(
+        "DE_g_2030",
+        NODE_CAPACITY_RATIO,
+        ("DE",),
+        "power",
+        period=(1, 1),
+        technologies=("pv",),
+        denominator_technologies=("pv", "nuclear"),
+    )
+    stub = _capacity_ratio_baseline_stub()
+    value = MGA._capacity_ratio_denominator_baseline(stub, axis)
+    assert value == pytest.approx(100.0)  # pv@DE year1 (40) + nuclear@DE year1 (60), not CH
+
+
+def test_capacity_ratio_denominator_baseline_raises_for_non_positive_value():
+    axis = Axis(
+        "DE_g_2030",
+        NODE_CAPACITY_RATIO,
+        ("DE",),
+        "power",
+        period=(1, 1),
+        technologies=("pv",),
+        denominator_technologies=("wind",),  # present in the data, zero everywhere
+    )
+    stub = SimpleNamespace(
+        _axis_year_indices={"DE_g_2030": [1]},
+        _capacity_mask=_all_ones_capacity_mask(_capacity_stock_data_array()),
+        capacity=SimpleNamespace(solution=_capacity_stock_data_array()),
+    )
+    with pytest.raises(RuntimeError, match="non-positive baseline denominator"):
+        MGA._capacity_ratio_denominator_baseline(stub, axis)
+
+
+def test_matching_ratio_capacity_type_rejects_mismatched_types():
+    stub = SimpleNamespace(
+        _capacity_mask=xr.DataArray(
+            [[1.0, 0.0], [0.0, 1.0]],
+            dims=["set_technologies", "set_capacity_types"],
+            coords={
+                "set_technologies": ["pv", "battery"],
+                "set_capacity_types": ["power", "energy"],
+            },
+        )
+    )
+    stub._selected_capacity_type = functools.partial(MGA._selected_capacity_type, stub)
+    with pytest.raises(ValueError, match="numerator capacity type"):
+        MGA._matching_ratio_capacity_type(stub, "g", ["pv"], ["battery"])
+
+
 def test_year_indices_in_period_is_boundary_inclusive():
     year_indices = [0, 1, 2, 3]
     real_years = [2021, 2025, 2030, 2035]
@@ -784,6 +1299,42 @@ def test_valid_node_capex_config_passes():
                     "nodes": ["DE"],
                     "until_years": [2030, 2040, 2050],
                     "technology_groups": [{"renewables": ["pv", "wind"]}],
+                },
+            },
+        }
+    )
+
+
+def test_valid_node_capacity_ratio_config_passes():
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": "oracle",
+            "axes": {
+                "node_capacity_ratio": {
+                    "nodes": ["DE"],
+                    "years": [2030, 2040, 2050],
+                    "ratio_groups": [
+                        {"road_electrification": {
+                            "numerator": ["BEV"],
+                            "denominator": ["BEV", "ICE_car"],
+                        }}
+                    ],
+                },
+            },
+        }
+    )
+
+
+def test_valid_node_carbon_emissions_cumulative_config_passes():
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": "oracle",
+            "axes": {
+                "node_carbon_emissions_cumulative": {
+                    "nodes": ["DE"],
+                    "until_years": [2030, 2040, 2050],
                 },
             },
         }
@@ -933,6 +1484,128 @@ def test_share_normalisation_rejected_with_carrier_import_axes():
         )
 
 
+@pytest.mark.parametrize("mode", ["sampling", "bbo", "batch"])
+def test_per_axes_normalisation_accepted_outside_oracle_mode(mode):
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": mode,
+            "normalisation": "per_axes",
+            "axes": {
+                "node_capex_cumulative": {"nodes": ["DE"], "until_years": [2030]},
+                "include_cost": True,
+            },
+            mode: {"tolerance_prob": 0.9},
+        }
+    )
+
+
+def test_per_axes_normalisation_rejected_in_oracle_mode():
+    with pytest.raises(ValueError, match="normalisation='per_axes'"):
+        validate_config(
+            {
+                "epsilon": 0.1,
+                "mode": "oracle",
+                "normalisation": "per_axes",
+                "axes": {
+                    "node_capex_cumulative": {"nodes": ["DE"], "until_years": [2030]},
+                },
+                "oracle": {"tolerance": 0.1},
+            }
+        )
+
+
+def test_per_axes_normalisation_rejected_with_technology_axes():
+    with pytest.raises(ValueError, match="normalisation='per_axes'"):
+        validate_config(
+            {
+                "epsilon": 0.1,
+                "mode": "sampling",
+                "normalisation": "per_axes",
+                "axes": {"technologies": ["nuclear"]},
+                "sampling": {"tolerance_prob": 0.9},
+            }
+        )
+
+
+def test_per_axes_normalisation_rejected_with_carrier_import_axes():
+    with pytest.raises(ValueError, match="normalisation='per_axes'"):
+        validate_config(
+            {
+                "epsilon": 0.1,
+                "mode": "sampling",
+                "normalisation": "per_axes",
+                "axes": {"carrier_imports": ["biomass"]},
+                "sampling": {"tolerance_prob": 0.9},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "axes_cfg",
+    [
+        {"node_capex": ["DE"]},
+        {"node_capex_by_technology": {"nodes": ["DE"], "technology_groups": ["pv"]}},
+        {
+            "node_capex_cumulative_tech": {
+                "nodes": ["DE"],
+                "until_years": [2030],
+                "technology_groups": ["pv"],
+            }
+        },
+    ],
+)
+def test_per_axes_normalisation_rejected_with_other_capex_kinds(axes_cfg):
+    with pytest.raises(ValueError, match="normalisation='per_axes'"):
+        validate_config(
+            {
+                "epsilon": 0.1,
+                "mode": "sampling",
+                "normalisation": "per_axes",
+                "axes": axes_cfg,
+                "sampling": {"tolerance_prob": 0.9},
+            }
+        )
+
+
+def test_per_axes_normalisation_accepted_with_capacity_ratio_and_emissions_axes():
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": "sampling",
+            "normalisation": "per_axes",
+            "axes": {
+                "node_capacity_ratio": {
+                    "nodes": ["DE"],
+                    "years": [2030],
+                    "ratio_groups": [
+                        {"g": {"numerator": ["BEV"], "denominator": ["BEV", "ICE_car"]}}
+                    ],
+                },
+                "node_carbon_emissions_cumulative": {
+                    "nodes": ["DE"],
+                    "until_years": [2030],
+                },
+            },
+            "sampling": {"tolerance_prob": 0.9},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "per_axes_capex_reference",
+    [0.0, -1.0, "15e12", True, float("nan")],
+)
+def test_invalid_per_axes_capex_reference_is_rejected(per_axes_capex_reference):
+    with pytest.raises(ValueError, match="per_axes_capex_reference"):
+        validate_config(
+            {
+                "mode": "sampling",
+                "per_axes_capex_reference": per_axes_capex_reference,
+            }
+        )
+
+
 def test_unknown_normalisation_value_is_rejected():
     with pytest.raises(ValueError, match="Unknown MGA normalisation"):
         validate_config({"mode": "sampling", "normalisation": "absolute"})
@@ -951,6 +1624,8 @@ def test_unknown_normalisation_value_is_rejected():
         {"axes": {"node_capex_cumulative": {"unti_years": []}}},  # nested typo
         {"axes": {"node_capex_by_technology": {"technolgy_groups": []}}},  # nested typo
         {"axes": {"node_capex_cumulative_tech": {"technolgy_groups": []}}},  # nested typo
+        {"axes": {"node_capacity_ratio": {"raito_groups": []}}},  # nested typo
+        {"axes": {"node_carbon_emissions_cumulative": {"unti_years": []}}},  # nested typo
     ],
 )
 def test_unknown_config_keys_are_rejected(cfg):
@@ -1467,6 +2142,51 @@ def test_node_capex_cumulative_tech_axis_unit_is_masked_to_the_selected_technolo
         technologies=("nuclear",),
     )
     assert axis_physical_unit(nuclear_only, units, pint.UnitRegistry()) == "megaEuro"
+
+
+EMISSIONS_UNITS = _units_series(
+    ["technology", "location", "time_operation"],
+    [
+        ("nuclear", "DE", 0),
+        ("nuclear", "CH", 0),
+    ],
+    ["kilogram", "kilogram"],
+)
+
+
+def test_node_capacity_ratio_axis_unit_is_dimensionless():
+    axis = Axis(
+        "DE_g_2030",
+        NODE_CAPACITY_RATIO,
+        ("DE",),
+        "power",
+        period=(2030, 2030),
+        technologies=("pv",),
+        denominator_technologies=("pv", "nuclear"),
+    )
+    # dimensionless unconditionally -- not dependent on `units` at all.
+    assert axis_physical_unit(axis, {}, pint.UnitRegistry()) == "dimensionless"
+    assert (
+        axis_physical_unit(
+            axis, {"capacity_addition": CAPACITY_UNITS}, pint.UnitRegistry()
+        )
+        == "dimensionless"
+    )
+
+
+def test_node_carbon_emissions_cumulative_axis_unit_is_annualised():
+    axis = Axis(
+        "DE_until_2030", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE",), None, period=(None, 2030)
+    )
+    units = {"carbon_emissions_technology": EMISSIONS_UNITS}
+    assert axis_physical_unit(axis, units, pint.UnitRegistry()) == "hour * kilogram"
+
+
+def test_node_carbon_emissions_cumulative_axis_unit_is_none_when_untracked():
+    axis = Axis(
+        "DE_until_2030", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE",), None, period=(None, 2030)
+    )
+    assert axis_physical_unit(axis, {}, pint.UnitRegistry()) is None
 
 
 def test_cost_axis_reads_the_cost_variable_unit():

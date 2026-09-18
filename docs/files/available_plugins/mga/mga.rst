@@ -153,14 +153,39 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
     whenever every axis should be explored to the same *relative* depth
     regardless of its size.
 
+    ``"per_axes"`` also reports each design axis as a fraction of a fixed
+    reference (scale = that reference, offset = 0), but -- unlike
+    ``"share"``, where one baseline total is shared by a whole group of
+    axes -- each axis *kind* supplies its own, physically-appropriate
+    reference: ``node_capex_cumulative`` axes divide by a fixed configurable
+    constant, ``per_axes_capex_reference`` (see below); ``node_capacity_ratio``
+    axes are already a fraction of their own baseline denominator (see that
+    axis kind below), so their reference is simply 1; ``node_carbon_emissions_cumulative``
+    axes divide by the model's own ``carbon_emissions_budget`` parameter.
+    The cost axis is unaffected, as always. It is only supported for these
+    three axis kinds (plus the cost axis) -- a config error is raised if
+    ``"per_axes"`` is selected alongside ``technologies``, ``carrier_imports``,
+    ``node_capex``, ``node_capex_by_technology`` or ``node_capex_cumulative_tech``
+    axes, since none of those has a defined ``per_axes`` reference. The
+    reference actually used is recorded per axis in ``axis_meta_json`` as
+    ``per_axes_reference``, and logged once per distinct axis kind when the
+    run starts.
+
     Oracle mode
     requires the default ``"relative"``: its max-min MILP relies on
     ``big_M``/``t_max`` dominating axis magnitudes and a cut-validity guard
     sized for O(1) normalised coordinates anchored at offset=0, both of
-    which assume relative normalisation; ``"units"``/``"minmax"``/``"share"``
-    raise a config error there. This key has no effect in ``"weights"``
-    mode, which never normalises axes -- weights are applied in each axis's
-    own physical units.
+    which assume relative normalisation; ``"units"``/``"minmax"``/``"share"``/
+    ``"per_axes"`` raise a config error there. This key has no effect in
+    ``"weights"`` mode, which never normalises axes -- weights are applied
+    in each axis's own physical units.
+
+``per_axes_capex_reference`` (float, default ``15e12``)
+    The fixed reference total (in the model's capex unit) that
+    ``node_capex_cumulative`` axes divide by under ``normalisation="per_axes"``.
+    Unused otherwise. This is a deliberate simplification for now -- not a
+    computed "share of net present cost" reference -- so pick a round number
+    that puts your study's capex axes in a sensible range.
 
 ``iterations`` (list of dicts, weights mode)
     One ``{"weights": {axis_name: weight}}`` dict per iteration. Each key
@@ -220,6 +245,60 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
       technology-group) pair -- axes from different technology groups are
       never compared, since their capex is not a nested cumulative window
       of the same quantity).
+    * ``node_capacity_ratio`` (dict): per-node axes of one named technology
+      group's installed *capacity* (not capacity addition) as a fraction of
+      another named technology group's, at one snapshot calendar year --
+      e.g. "BEV + HDT-BEV capacity / all road-transport-technology capacity"
+      to track direct electrification. ``nodes`` uses the same
+      name-or-lumped-dict format as ``node_capex``; ``years`` is a list of
+      target calendar years (a snapshot, unlike ``until_years`` -- capacity
+      is already a stock variable at that year, no cumulation needed);
+      ``ratio_groups`` is a list of single-key dicts
+      ``{group_name: {"numerator": [...], "denominator": [...]}}``, both
+      lists in the same technology-name/lump format as
+      ``node_capex_by_technology``'s ``technology_groups`` (a numerator
+      technology appearing in its own denominator, e.g. BEV in both, is the
+      expected, normal case and is allowed). One axis is created per
+      (node/group, ratio-group, year) combination, named
+      ``<node_or_group>_<ratio_group_name>_<year>``, iterated nodes-major,
+      ratio-groups-middle, years-minor. Both the numerator and denominator
+      technology groups of one ratio-group must resolve to the same
+      capacity type (power or energy) -- a config error is raised otherwise.
+
+      **The denominator is evaluated once, on the cost-optimal baseline
+      design, and held fixed** for every explored point of that axis --
+      *not* recomputed live. This is because both the numerator and
+      denominator are sums of decision variables, so a live ratio of the
+      two would be a genuine nonlinear term and could not serve as an LP
+      objective/projection term the way every other axis does (needed for
+      the VMM bound LPs, the weights-mode objective, oracle's projection
+      equality, and sampling/bbo/batch's support-function objective).
+      Freezing the denominator at baseline is a good proxy whenever its
+      technology group's aggregate capacity is largely demand-driven and
+      not expected to move much across near-optimal designs (e.g. total
+      road-transport or heating technology capacity, driven by exogenous
+      mileage/heat demand) -- it is a deliberate approximation, not an
+      oversight, and both the denominator technology group and the
+      baseline value it was frozen at are recorded per axis in
+      ``axis_meta_json`` (as ``denominator_technologies`` /
+      ``capacity_ratio_denominator_baseline``) for traceability. Unlike
+      every cumulative axis kind, these axes are **not** constrained to be
+      monotonic across years -- a capacity share can legitimately rise or
+      fall year to year.
+    * ``node_carbon_emissions_cumulative`` (dict): per-node cumulative
+      carbon-emissions axes, restricted to every model year up to and
+      including a target calendar year -- structurally identical to
+      ``node_capex_cumulative`` (same ``nodes``/``until_years`` shape, same
+      ``<node_or_group>_until_<until_year>`` naming, same monotonicity
+      behaviour in oracle/sampling/bbo/batch modes), but summing the
+      model's ``carbon_emissions_technology`` instead of
+      ``cost_capex_yearly``. Interval-expanded across sampled years the
+      same way the capex axes are, but **not discounted** -- carbon
+      emissions aren't a monetary quantity. Since the naming scheme is
+      identical to ``node_capex_cumulative``'s, reusing the same node/group
+      name in both blocks with an overlapping ``until_year`` is rejected as
+      a duplicate axis name; use distinct node/group names across the two
+      blocks (e.g. ``"DE"`` vs. ``"DE_co2"``) if you need both.
     * ``include_cost`` (bool, default false): add the total-cost axis.
 
 ``oracle`` (dict, oracle mode)
@@ -248,10 +327,12 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
       below which a direction counts as well-approximated. Its meaning
       depends on ``normalisation``: a fraction of each axis's near-optimal
       range under ``"relative"``/``"minmax"``, a raw physical-unit gap under
-      ``"units"``, and a fraction of a *shared* reference total (not each
-      axis's own range) under ``"share"`` -- see the ``"share"`` paragraph
-      under ``normalisation`` above for why this deliberately spends more
-      exploration on larger axes/regions and less on smaller ones.
+      ``"units"``, a fraction of a *shared* reference total (not each axis's
+      own range) under ``"share"`` -- see the ``"share"`` paragraph under
+      ``normalisation`` above for why this deliberately spends more
+      exploration on larger axes/regions and less on smaller ones -- and a
+      fraction of each axis kind's own ``"per_axes"`` reference under
+      ``"per_axes"``.
     * ``n_samples`` (int, default 1000): directions sampled per iteration to
       estimate the confidence interval.
     * ``alpha`` (float, default 0.05): significance level of the interval.
@@ -385,6 +466,47 @@ Example (oracle mode):
                     "tolerance": 0.1,
                     "max_min": {"solver_options": {"TimeLimit": 120}}
                 }
+            }
+        }
+    }
+
+Example (bbo mode, ``"per_axes"`` normalisation):
+
+.. code-block:: json
+
+    {
+        "plugins": {
+            "mga": {
+                "mode": "bbo",
+                "epsilon": 0.1,
+                "normalisation": "per_axes",
+                "per_axes_capex_reference": 15e12,
+                "axes": {
+                    "node_capex_cumulative": {
+                        "nodes": ["north", "west", "south", "east"],
+                        "until_years": [2030, 2040, 2050]
+                    },
+                    "node_capacity_ratio": {
+                        "nodes": ["north", "west", "south", "east"],
+                        "years": [2030, 2040, 2050],
+                        "ratio_groups": [
+                            {"road_electrification": {
+                                "numerator": ["BEV", "HDT-BEV"],
+                                "denominator": ["BEV", "HDT-BEV", "ICE_car", "ICE_truck"]
+                            }},
+                            {"heating_electrification": {
+                                "numerator": ["e_boiler", "heat_pump"],
+                                "denominator": ["e_boiler", "heat_pump", "gas_boiler", "oil_boiler"]
+                            }}
+                        ]
+                    },
+                    "node_carbon_emissions_cumulative": {
+                        "nodes": ["north", "west", "south", "east"],
+                        "until_years": [2030, 2040, 2050]
+                    },
+                    "include_cost": true
+                },
+                "bbo": {"tolerance_prob": 0.9}
             }
         }
     }

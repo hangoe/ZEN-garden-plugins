@@ -41,8 +41,11 @@ Glossary
                 group restricted to an explicit calendar-year span, a
                 per-node capex group restricted to a named technology group,
                 a per-node capex group restricted to both a calendar-year
-                span and a named technology group at once, or the total cost
-                (see axes.py)
+                span and a named technology group at once, a per-node ratio
+                of two named technology groups' installed capacity at a
+                snapshot calendar year, a per-node cumulative
+                carbon-emissions group restricted to an explicit
+                calendar-year span, or the total cost (see axes.py)
     n_z         number of axes, cost included -- the dimension of the
                 explored space
     C* (c_star) the baseline (cost-optimal) net present cost
@@ -76,6 +79,16 @@ Glossary
                 ones. This is intended behaviour of "share" normalisation,
                 not a defect; use "minmax" instead when every axis should
                 be explored to the same relative depth regardless of size.
+                Under "per_axes" (NODE_CAPEX_CUMULATIVE,
+                NODE_CAPACITY_RATIO and NODE_CARBON_EMISSIONS_CUMULATIVE
+                axes only), scale = a reference specific to each axis's own
+                kind, not one shared group total: NODE_CAPEX_CUMULATIVE
+                divides by a fixed configurable constant
+                (per_axes_capex_reference), NODE_CAPACITY_RATIO by 1 (it is
+                already a fraction of its own baseline-frozen denominator),
+                and NODE_CARBON_EMISSIONS_CUMULATIVE by the model's own
+                carbon_emissions_budget parameter; offset = 0. The reference
+                actually used is recorded per axis in polytope_metadata().
                 Either way the cost axis uses
                 scale = epsilon * C*
                 and offset = C*, so 0 is the cost optimum and 1 the budget.
@@ -104,10 +117,12 @@ from .batch_driver import run_batch_mode
 from .oracle_driver import run_oracle_mode
 from .polytope_io import (
     CARRIER_IMPORT,
+    NODE_CAPACITY_RATIO,
     NODE_CAPEX,
     NODE_CAPEX_CUMULATIVE,
     NODE_CAPEX_CUMULATIVE_TECH,
     NODE_CAPEX_TECH,
+    NODE_CARBON_EMISSIONS_CUMULATIVE,
     TECH_CAPACITY,
     TOTAL_COST,
 )
@@ -121,6 +136,7 @@ config = {
     "epsilon": 0.1,
     "mode": "weights",
     "normalisation": "relative",
+    "per_axes_capex_reference": 15e12,
     "iterations": [],
     "axes": {},
     "oracle": {},
@@ -136,6 +152,7 @@ _KNOWN_KEYS = {
         "epsilon",
         "mode",
         "normalisation",
+        "per_axes_capex_reference",
         "iterations",
         "axes",
         "oracle",
@@ -151,6 +168,8 @@ _KNOWN_KEYS = {
         "node_capex_cumulative",
         "node_capex_by_technology",
         "node_capex_cumulative_tech",
+        "node_capacity_ratio",
+        "node_carbon_emissions_cumulative",
     },
     "plugins.mga.axes.node_capex_cumulative": {"nodes", "until_years"},
     "plugins.mga.axes.node_capex_by_technology": {"nodes", "technology_groups"},
@@ -159,6 +178,8 @@ _KNOWN_KEYS = {
         "until_years",
         "technology_groups",
     },
+    "plugins.mga.axes.node_capacity_ratio": {"nodes", "years", "ratio_groups"},
+    "plugins.mga.axes.node_carbon_emissions_cumulative": {"nodes", "until_years"},
     "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
     "plugins.mga.oracle.max_min": {
         "formulation",
@@ -255,19 +276,28 @@ def _year_indices_in_period(period, year_indices, real_years):
     ]
 
 
-def _capex_npc_discount_factors(
+def _year_interval_expansion_factors(
     year_indices, discount_rate: float, interval_between_years: int, last_year_index: int
 ) -> "xr.DataArray":
-    """Per-sampled-year discount factor, indexed by set_time_steps_yearly,
-    reproducing ZEN-garden's own constraint_net_present_cost formula
-    (energy_system.py) exactly -- so a node-capex axis can be discounted the
-    same way net_present_cost itself is.
+    """Per-sampled-year discount/interval-expansion factor, indexed by
+    set_time_steps_yearly.
+
+    With discount_rate > 0, reproduces ZEN-garden's own
+    constraint_net_present_cost formula (energy_system.py) exactly -- so a
+    node-capex axis can be discounted the same way net_present_cost itself
+    is:
 
     factor[y] = sum_{i=0}^{n-1} (1/(1+discount_rate)) ** (interval_between_years*(y-y0) + i)
 
     where n = 1 for the final sampled year (no extrapolation past the
     horizon, matching constraint_net_present_cost's own last-year special
-    case), else n = interval_between_years; y0 = year_indices[0].
+    case), else n = interval_between_years; y0 = year_indices[0]. With
+    discount_rate = 0.0, every term collapses to 1, so factor[y] = n --
+    exactly the plain interval multiplicity ZEN-garden's own
+    constraint_carbon_emissions_cumulative uses (each non-final sampled
+    year counts interval_between_years times, undiscounted), used for the
+    node-carbon-emissions-cumulative axis, which is interval-expanded but
+    not discounted.
     """
     y0 = year_indices[0]
     factors = []
@@ -335,6 +365,14 @@ def validate_config(cfg) -> None:
             "plugins.mga.axes.node_capex_cumulative_tech",
             cfg.get("axes", {}).get("node_capex_cumulative_tech", {}),
         ),
+        (
+            "plugins.mga.axes.node_capacity_ratio",
+            cfg.get("axes", {}).get("node_capacity_ratio", {}),
+        ),
+        (
+            "plugins.mga.axes.node_carbon_emissions_cumulative",
+            cfg.get("axes", {}).get("node_carbon_emissions_cumulative", {}),
+        ),
         ("plugins.mga.oracle", cfg.get("oracle", {})),
         ("plugins.mga.oracle.max_min", cfg.get("oracle", {}).get("max_min", {})),
         ("plugins.mga.sampling", cfg.get("sampling", {})),
@@ -349,10 +387,10 @@ def validate_config(cfg) -> None:
             )
 
     normalisation = cfg.get("normalisation", "relative")
-    if normalisation not in ("relative", "minmax", "units", "share"):
+    if normalisation not in ("relative", "minmax", "units", "share", "per_axes"):
         raise ValueError(
             f"Unknown MGA normalisation: {normalisation!r}. Expected "
-            f"'relative', 'minmax', 'units' or 'share'."
+            f"'relative', 'minmax', 'units', 'share' or 'per_axes'."
         )
     axes_cfg = cfg.get("axes", {})
     if normalisation == "share" and (
@@ -364,14 +402,44 @@ def validate_config(cfg) -> None:
             "node_capex_cumulative_tech); remove axes.technologies/"
             "axes.carrier_imports or use a different normalisation."
         )
-    if cfg.get("mode") == "oracle" and normalisation in ("units", "minmax", "share"):
+    if normalisation == "per_axes" and (
+        axes_cfg.get("technologies")
+        or axes_cfg.get("carrier_imports")
+        or axes_cfg.get("node_capex")
+        or axes_cfg.get("node_capex_by_technology")
+        or axes_cfg.get("node_capex_cumulative_tech")
+    ):
+        raise ValueError(
+            "MGA: normalisation='per_axes' only supports node_capex_cumulative, "
+            "node_capacity_ratio and node_carbon_emissions_cumulative axes (plus "
+            "the cost axis); remove axes.technologies/axes.carrier_imports/"
+            "axes.node_capex/axes.node_capex_by_technology/"
+            "axes.node_capex_cumulative_tech or use a different normalisation."
+        )
+    if cfg.get("mode") == "oracle" and normalisation in (
+        "units",
+        "minmax",
+        "share",
+        "per_axes",
+    ):
         raise ValueError(
             f"MGA: normalisation={normalisation!r} is not supported in "
             "oracle mode -- oracle's max-min MILP relies on big_M/t_max "
             "dominating axis magnitudes and a cut-validity guard sized for "
             "O(1) normalised coordinates anchored at offset=0, both of "
             "which assume 'relative' normalisation. Use sampling or bbo "
-            "mode for 'units'/'minmax'/'share'."
+            "mode for 'units'/'minmax'/'share'/'per_axes'."
+        )
+    per_axes_capex_reference = cfg.get("per_axes_capex_reference", 15e12)
+    if (
+        isinstance(per_axes_capex_reference, bool)
+        or not isinstance(per_axes_capex_reference, (int, float))
+        or not np.isfinite(per_axes_capex_reference)
+        or per_axes_capex_reference <= 0
+    ):
+        raise ValueError(
+            "MGA: per_axes_capex_reference must be a positive finite number, "
+            f"got {per_axes_capex_reference!r}."
         )
 
 
@@ -407,7 +475,10 @@ class MGA:
         node_capex_cumulative=None,
         node_capex_by_technology=None,
         node_capex_cumulative_tech=None,
+        node_capacity_ratio=None,
+        node_carbon_emissions_cumulative=None,
         normalisation="relative",
+        per_axes_capex_reference=15e12,
     ):
         """
         Args:
@@ -446,6 +517,28 @@ class MGA:
                 non-decreasing across ascending until_year (see
                 build_initial_outer_approximation()); axes are never
                 compared across different technology groups.
+            node_capacity_ratio: Per-node axes of one named technology
+                group's installed capacity as a fraction of another named
+                technology group's: {"nodes": [...same format as
+                node_capex...], "years": [2030, 2040, ...], "ratio_groups":
+                [{group_name: {"numerator": [...technology names/lumps...],
+                "denominator": [...technology names/lumps...]}}, ...]}.
+                Produces one axis per (node/lump, ratio-group, year)
+                combination, named f"{node_name}_{ratio_name}_{year}". The
+                denominator is evaluated once on the baseline design z* and
+                held fixed (see axes.py's Axis docstring) since a live
+                ratio of two decision-variable sums cannot serve as an LP
+                objective/projection term; axes are not constrained to be
+                monotonic across years.
+            node_carbon_emissions_cumulative: Per-node cumulative
+                carbon-emissions axes restricted to all model years up to a
+                target calendar year: {"nodes": [...same format as
+                node_capex...], "until_years": [2030, 2040, ...]}. Produces
+                one axis per (node/lump, until_year) combination, named
+                f"{name}_until_{until_year}"; interval-expanded but not
+                discounted (unlike the capex axes). Axes sharing a node/lump
+                group are constrained to be monotonically non-decreasing
+                (see build_initial_outer_approximation()).
             normalisation: "relative" (default) scales design axes by their
                 near-optimal maximum; "minmax" maps each axis's own
                 near-optimal [min, max] onto [0, 1]; "units" reports them in
@@ -458,9 +551,19 @@ class MGA:
                 full horizon) for node_capex_by_technology and
                 node_capex_cumulative_tech axes; both the rounded total and
                 the raw value it came from are recorded per axis in
-                polytope_metadata(). The cost axis is always
+                polytope_metadata(). "per_axes" (node_capex_cumulative,
+                node_capacity_ratio and node_carbon_emissions_cumulative
+                axes only) reports each axis against its own kind-specific
+                reference instead of one shared run-wide total:
+                node_capex_cumulative divides by `per_axes_capex_reference`;
+                node_capacity_ratio is already a fraction (reference 1);
+                node_carbon_emissions_cumulative divides by the model's own
+                carbon_emissions_budget parameter. The cost axis is always
                 budget-relative.
                 See solve_axis_bounds().
+            per_axes_capex_reference: The fixed reference total (in the
+                model's capex unit) that node_capex_cumulative axes divide
+                by under normalisation="per_axes". Unused otherwise.
         """
         if epsilon <= 0:
             raise ValueError(f"MGA epsilon must be positive, got {epsilon!r}")
@@ -494,6 +597,9 @@ class MGA:
             node_capex_cumulative_chains,
             node_capex_cumulative_tech_axes,
             node_capex_cumulative_tech_chains,
+            node_capacity_ratio_axes,
+            node_carbon_emissions_cumulative_axes,
+            node_carbon_emissions_cumulative_chains,
         ) = build_axis_groups(
             technologies,
             carrier_imports,
@@ -503,14 +609,20 @@ class MGA:
             node_capex_cumulative=node_capex_cumulative,
             node_capex_by_technology=node_capex_by_technology,
             node_capex_cumulative_tech=node_capex_cumulative_tech,
+            node_capacity_ratio=node_capacity_ratio,
+            node_carbon_emissions_cumulative=node_carbon_emissions_cumulative,
             all_nodes=self.all_nodes,
         )
-        # Chains of cumulative-capex axis names (same node/lump group, and
-        # for node_capex_cumulative_tech also the same technology group,
-        # ascending until_year), used by build_initial_outer_approximation
+        # Chains of cumulative axis names (same node/lump group, and for
+        # node_capex_cumulative_tech also the same technology group,
+        # ascending until_year/year), used by build_initial_outer_approximation
         # to add monotonicity rows; empty when there are no such axes.
+        # node_capacity_ratio has no chains -- a ratio is not expected to be
+        # monotonic across years.
         self._monotone_capex_chains = (
-            node_capex_cumulative_chains + node_capex_cumulative_tech_chains
+            node_capex_cumulative_chains
+            + node_capex_cumulative_tech_chains
+            + node_carbon_emissions_cumulative_chains
         )
 
         # The single source of truth for axis order everywhere downstream
@@ -569,6 +681,32 @@ class MGA:
                     node_capex_cumulative_tech_axes
                 )
             ]
+            + [
+                Axis(
+                    name,
+                    NODE_CAPACITY_RATIO,
+                    tuple(node_members),
+                    self._matching_ratio_capacity_type(
+                        name, numerator_members, denominator_members
+                    ),
+                    period=(year, year),
+                    technologies=tuple(numerator_members),
+                    denominator_technologies=tuple(denominator_members),
+                )
+                for name, node_members, numerator_members, denominator_members, year in (
+                    node_capacity_ratio_axes
+                )
+            ]
+            + [
+                Axis(
+                    name,
+                    NODE_CARBON_EMISSIONS_CUMULATIVE,
+                    tuple(members),
+                    None,
+                    period=(None, until_year),
+                )
+                for name, members, until_year in node_carbon_emissions_cumulative_axes
+            ]
         )
         if include_cost:
             self.axes.append(Axis(COST_VARIABLE, TOTAL_COST, (), None))
@@ -585,55 +723,130 @@ class MGA:
             self.flow_import = None
             self._ts_duration = None
 
-        # Model handle and period->year-index lookup needed by node-capex
-        # axes. cost_capex_yearly is indexed by set_location, a per-
-        # technology-family dimension whose coordinate values are node names
-        # for conversion/storage/retrofitting technologies and edge names for
-        # transport technologies; .sel(set_location=<node names>) therefore
-        # naturally excludes transport-technology capex (invalid entries),
-        # the same mechanism the tech-capacity axis already relies on.
-        _node_kinds = (
+        # Model handles needed by capacity-ratio axes: the *stock* capacity
+        # variable (distinct from capacity_addition, which tech axes use).
+        if any(axis.kind == NODE_CAPACITY_RATIO for axis in self.axes):
+            self.capacity = self.model.variables["capacity"]
+        else:
+            self.capacity = None
+
+        # Model handle needed by node-capex axes. cost_capex_yearly is
+        # indexed by set_location, a per-technology-family dimension whose
+        # coordinate values are node names for conversion/storage/
+        # retrofitting technologies and edge names for transport
+        # technologies; .sel(set_location=<node names>) therefore naturally
+        # excludes transport-technology capex (invalid entries), the same
+        # mechanism the tech-capacity axis already relies on.
+        _node_capex_kinds = (
             NODE_CAPEX,
             NODE_CAPEX_CUMULATIVE,
             NODE_CAPEX_TECH,
             NODE_CAPEX_CUMULATIVE_TECH,
         )
-        _cumulative_kinds = (NODE_CAPEX_CUMULATIVE, NODE_CAPEX_CUMULATIVE_TECH)
-        self._axis_year_indices: dict[str, list] = {}
-        if any(axis.kind in _node_kinds for axis in self.axes):
+        if any(axis.kind in _node_capex_kinds for axis in self.axes):
             self.cost_capex_yearly = self.model.variables["cost_capex_yearly"]
-            year_indices = list(
-                self.cost_capex_yearly.coords["set_time_steps_yearly"].values
+        else:
+            self.cost_capex_yearly = None
+
+        # Model handle needed by node-carbon-emissions-cumulative axes:
+        # carbon_emissions_technology is an instantaneous per-operation-step
+        # rate (like flow_import), annualised once here the same way
+        # ZEN-garden's own constraint_carbon_emissions_technology_total
+        # annualises it (energy_system.py), so it can be sliced/summed by
+        # location/year in _design_axis_terms without re-annualising on
+        # every call.
+        if any(axis.kind == NODE_CARBON_EMISSIONS_CUMULATIVE for axis in self.axes):
+            carbon_emissions_technology = self.model.variables[
+                "carbon_emissions_technology"
+            ]
+            year_op_duration = (
+                optimization_setup.energy_system.rules.get_year_time_step_duration_array()
             )
+            self.carbon_emissions_technology_yearly = (
+                carbon_emissions_technology * year_op_duration
+            ).sum("set_time_steps_operation")
+        else:
+            self.carbon_emissions_technology_yearly = None
+
+        # period->year-index lookup needed by every axis kind restricted to
+        # a calendar-year window (cumulative or single-year snapshot).
+        # Sourced directly from the model's own yearly time-step set/
+        # calendar-year mapping, independent of whether any capex axis
+        # exists (unlike the capex discount factor below, which capex axes
+        # alone need).
+        _period_kinds = (
+            NODE_CAPEX_CUMULATIVE,
+            NODE_CAPEX_CUMULATIVE_TECH,
+            NODE_CAPACITY_RATIO,
+            NODE_CARBON_EMISSIONS_CUMULATIVE,
+        )
+        self._axis_year_indices: dict[str, list] = {}
+        if any(axis.kind in _period_kinds for axis in self.axes):
+            year_indices = list(optimization_setup.energy_system.set_time_steps_yearly)
             real_years = list(optimization_setup.energy_system.set_time_steps_years)
-            # Discount + interval-expand each sampled year's capex the same
-            # way net_present_cost itself is (constraint_net_present_cost in
-            # energy_system.py) -- otherwise this axis sums each sampled
-            # year's capex once, undiscounted, while net_present_cost counts
-            # it interval_between_years times (once per real calendar year it
-            # represents) and discounts each occurrence, making the two
-            # non-comparable. Applied in _design_axis_terms.
-            self._capex_discount_factor = _capex_npc_discount_factors(
-                year_indices,
-                float(optimization_setup.parameters.discount_rate),
-                int(optimization_setup.system.interval_between_years),
-                int(optimization_setup.energy_system.set_time_steps_yearly_entire_horizon[-1]),
+            last_year_index = int(
+                optimization_setup.energy_system.set_time_steps_yearly_entire_horizon[-1]
             )
+            interval_between_years = int(optimization_setup.system.interval_between_years)
             for axis in self.axes:
-                if axis.kind not in _cumulative_kinds:
+                if axis.kind not in _period_kinds:
                     continue
                 ids = _year_indices_in_period(axis.period, year_indices, real_years)
                 if not ids:
-                    until_year = axis.period[1]
+                    target_year = axis.period[1]
                     raise ValueError(
-                        f"MGA: axis {axis.name!r} until_year {until_year} "
-                        f"covers no model year (model years: "
+                        f"MGA: axis {axis.name!r} year(s) up to {target_year} "
+                        f"cover no model year (model years: "
                         f"{real_years[0]}-{real_years[-1]})."
                     )
                 self._axis_year_indices[axis.name] = ids
         else:
-            self.cost_capex_yearly = None
-            self._capex_discount_factor = None
+            year_indices = None
+            interval_between_years = None
+            last_year_index = None
+
+        # Discount + interval-expand each sampled year's capex the same way
+        # net_present_cost itself is (constraint_net_present_cost in
+        # energy_system.py) -- otherwise this axis sums each sampled year's
+        # capex once, undiscounted, while net_present_cost counts it
+        # interval_between_years times (once per real calendar year it
+        # represents) and discounts each occurrence, making the two
+        # non-comparable. Applied in _design_axis_terms.
+        self._capex_discount_factor = (
+            _year_interval_expansion_factors(
+                year_indices,
+                float(optimization_setup.parameters.discount_rate),
+                interval_between_years,
+                last_year_index,
+            )
+            if self.cost_capex_yearly is not None
+            else None
+        )
+
+        # Carbon emissions aren't discounted, only interval-expanded (the
+        # r=0 case of the same formula reduces to the plain interval
+        # multiplicity ZEN-garden's own constraint_carbon_emissions_cumulative
+        # uses -- see _year_interval_expansion_factors' docstring).
+        self._emissions_interval_factor = (
+            _year_interval_expansion_factors(
+                year_indices, 0.0, interval_between_years, last_year_index
+            )
+            if self.carbon_emissions_technology_yearly is not None
+            else None
+        )
+
+        # Fixed baseline denominators for node_capacity_ratio axes, read now
+        # (see z_star_phys below) rather than recomputed per explored
+        # point -- both technology groups are decision-variable sums, so a
+        # live ratio would be a nonlinear term unusable as an LP objective.
+        # Scoped to each axis's own node(s)/year (not widened to all nodes
+        # like the "share" reference total, since this is per-axis, not a
+        # shared group total).
+        self._ratio_denominator_baseline: dict[str, float] = {
+            axis.name: self._capacity_ratio_denominator_baseline(axis)
+            for axis in self.axes
+            if axis.kind == NODE_CAPACITY_RATIO
+        }
 
         # Normalisation convention used by solve_axis_bounds(); the
         # scale/offset it computes below are set once and derived from this.
@@ -701,6 +914,32 @@ class MGA:
                     f"{axis.name!r}'s group: {raw:.6g} rounded to "
                     f"{_round_to_one_significant_figure(raw):.6g}"
                 )
+
+        # Per-axis-kind reference for normalisation="per_axes": unlike
+        # "share" (one shared baseline total per run), each axis kind
+        # supplies its own physically-appropriate reference -- validate_config
+        # guarantees every axis here is node_capex_cumulative,
+        # node_capacity_ratio, node_carbon_emissions_cumulative or
+        # TOTAL_COST.
+        self._per_axes_reference: dict[str, float] = {}
+        if self.normalisation == "per_axes":
+            logged_kinds = set()
+            for axis in self.axes:
+                if axis.kind == NODE_CAPEX_CUMULATIVE:
+                    ref = float(per_axes_capex_reference)
+                elif axis.kind == NODE_CAPACITY_RATIO:
+                    ref = 1.0
+                elif axis.kind == NODE_CARBON_EMISSIONS_CUMULATIVE:
+                    ref = float(optimization_setup.parameters.carbon_emissions_budget)
+                else:
+                    continue
+                self._per_axes_reference[axis.name] = ref
+                if axis.kind not in logged_kinds:
+                    logged_kinds.add(axis.kind)
+                    logging.info(
+                        f"MGA: normalisation='per_axes' reference for kind "
+                        f"{axis.kind!r}: {ref:.6g}"
+                    )
 
         # 1-based, matching pyoNearOpt's iteration numbers in diagnostics.csv.
         self._iter_count = 1
@@ -854,30 +1093,107 @@ class MGA:
             )
         return "+".join(types)
 
-    def _design_axis_terms(self, axis: Axis, capacity, flow, capex=None):
-        """One design axis over `capacity`/`flow`/`capex` data.
+    def _matching_ratio_capacity_type(
+        self, name: str, numerator_members: list, denominator_members: list
+    ) -> str:
+        """The capacity type shared by a node_capacity_ratio axis's
+        numerator and denominator technology groups.
 
-        The arguments are either the linopy variables (yielding the axis
-        LinearExpression) or their `.solution` arrays (yielding the axis
-        value): technology axes sum the capacity addition of the member
-        technologies, restricted by the capacity-type mask; carrier axes sum
-        the duration-weighted annual import of the member carriers,
-        sum_{m,n,t} tau_t * flow[m, n, t]; node-capex axes sum the annualised
-        capex of the member nodes over all capacity types, over all model
-        years (NODE_CAPEX) or every model year up to the axis's until_year
-        (NODE_CAPEX_CUMULATIVE), and over either all technologies or just
-        the axis's technology group (NODE_CAPEX_TECH), or both a year cutoff
-        and a technology group at once (NODE_CAPEX_CUMULATIVE_TECH). Every
-        node-capex kind weights each sampled year's capex by
-        `_capex_discount_factor` before summing, reproducing ZEN-garden's own
-        net_present_cost discounting/interval-expansion (see
-        _capex_npc_discount_factors) so this axis is on the same accounting
-        basis as the TOTAL_COST axis.
+        Each group's type is resolved independently via
+        _selected_capacity_type; the two must agree, since a ratio of power
+        capacity to energy capacity (or vice versa) is not physically
+        meaningful.
+        """
+        numerator_type = self._selected_capacity_type(
+            f"{name} (numerator)", numerator_members
+        )
+        denominator_type = self._selected_capacity_type(
+            f"{name} (denominator)", denominator_members
+        )
+        if numerator_type != denominator_type:
+            raise ValueError(
+                f"MGA node_capacity_ratio axis {name!r}: numerator capacity "
+                f"type {numerator_type!r} != denominator capacity type "
+                f"{denominator_type!r}."
+            )
+        return numerator_type
+
+    def _capacity_ratio_denominator_baseline(self, axis: Axis) -> float:
+        """A node_capacity_ratio axis's frozen denominator: its denominator
+        technology group's total installed capacity, at the axis's own
+        member node(s) and snapshot year, on the baseline (cost-optimal)
+        solution. Computed once, in __init__, before any bound LP touches
+        the model -- see the Axis class docstring for why the denominator
+        is frozen rather than recomputed per explored design.
+
+        Unlike normalisation="share"'s reference total, this is NOT widened
+        to all nodes: it stays scoped to this axis's own region/year, since
+        every (region, year) combination gets its own baseline, not one
+        shared total across a run.
+        """
+        year_ids = self._axis_year_indices[axis.name]
+        value = float(
+            (self._capacity_mask * self.capacity.solution)
+            .sel(
+                set_technologies=list(axis.denominator_technologies),
+                set_location=list(axis.members),
+                set_time_steps_yearly=year_ids,
+            )
+            .sum()
+        )
+        if not np.isfinite(value) or value <= 0:
+            raise RuntimeError(
+                f"MGA: node_capacity_ratio axis {axis.name!r} has a "
+                f"non-positive baseline denominator {value:.6g} (no member "
+                f"of {axis.denominator_technologies} has capacity at "
+                f"{axis.members}/{axis.period[1]} in the baseline design); "
+                f"remove the axis or check its denominator technology group."
+            )
+        return value
+
+    def _design_axis_terms(
+        self,
+        axis: Axis,
+        capacity_addition,
+        flow,
+        capex=None,
+        capacity_stock=None,
+        emissions=None,
+    ):
+        """One design axis over `capacity_addition`/`flow`/`capex`/
+        `capacity_stock`/`emissions` data.
+
+        The arguments are either the linopy variables/precomputed
+        expressions (yielding the axis LinearExpression) or their
+        `.solution` arrays (yielding the axis value): technology axes sum
+        the capacity addition of the member technologies, restricted by the
+        capacity-type mask; carrier axes sum the duration-weighted annual
+        import of the member carriers, sum_{m,n,t} tau_t * flow[m, n, t];
+        node-capex axes sum the annualised capex of the member nodes over
+        all capacity types, over all model years (NODE_CAPEX) or every
+        model year up to the axis's until_year (NODE_CAPEX_CUMULATIVE), and
+        over either all technologies or just the axis's technology group
+        (NODE_CAPEX_TECH), or both a year cutoff and a technology group at
+        once (NODE_CAPEX_CUMULATIVE_TECH); every node-capex kind weights
+        each sampled year's capex by `_capex_discount_factor` before
+        summing, reproducing ZEN-garden's own net_present_cost
+        discounting/interval-expansion (see
+        _year_interval_expansion_factors) so this axis is on the same
+        accounting basis as the TOTAL_COST axis. NODE_CARBON_EMISSIONS_CUMULATIVE
+        axes sum the annualised carbon emissions of the member nodes over
+        every model year up to the axis's until_year, weighted by
+        `_emissions_interval_factor` (interval-expansion only, no
+        discounting -- emissions aren't discounted). NODE_CAPACITY_RATIO
+        axes are numerator_capacity / denominator_baseline: the live
+        installed capacity of the axis's technology (numerator) group at
+        its member node(s) and snapshot year, divided by the precomputed,
+        baseline-frozen `_ratio_denominator_baseline` scalar for that axis
+        (see the Axis class docstring for why the denominator is frozen).
         """
         members = list(axis.members)
         if axis.kind == TECH_CAPACITY:
             return (
-                (self._capacity_mask * capacity)
+                (self._capacity_mask * capacity_addition)
                 .sel(set_technologies=members)
                 .sum(self._TECH_AGG + ["set_technologies"])
             )
@@ -885,6 +1201,27 @@ class MGA:
             return (self._ts_duration * flow.sel(set_carriers=members)).sum(
                 self._CARRIER_AGG + ["set_carriers"]
             )
+        if axis.kind == NODE_CAPACITY_RATIO:
+            year_ids = self._axis_year_indices[axis.name]
+            numerator = (
+                (self._capacity_mask * capacity_stock)
+                .sel(
+                    set_technologies=list(axis.technologies),
+                    set_location=members,
+                    set_time_steps_yearly=year_ids,
+                )
+                .sum(["set_technologies", "set_capacity_types", "set_location", "set_time_steps_yearly"])
+            )
+            return numerator / self._ratio_denominator_baseline[axis.name]
+        if axis.kind == NODE_CARBON_EMISSIONS_CUMULATIVE:
+            # Transport technologies have no valid entry at a node-named
+            # location, so they drop out of this selection for free (same
+            # mechanism as the node-capex kinds below).
+            term = emissions.sel(set_location=members)
+            year_ids = self._axis_year_indices[axis.name]
+            term = term.sel(set_time_steps_yearly=year_ids)
+            term = term * self._emissions_interval_factor
+            return term.sum(["set_technologies", "set_location"])
         # NODE_CAPEX / NODE_CAPEX_CUMULATIVE / NODE_CAPEX_TECH /
         # NODE_CAPEX_CUMULATIVE_TECH: transport technologies have no valid
         # entry at a node-named location, so they drop out of this selection
@@ -908,7 +1245,12 @@ class MGA:
         if axis.kind == TOTAL_COST:
             return self._total_cost_expression()
         return self._design_axis_terms(
-            axis, self.capacity_addition, self.flow_import, capex=self.cost_capex_yearly
+            axis,
+            self.capacity_addition,
+            self.flow_import,
+            capex=self.cost_capex_yearly,
+            capacity_stock=self.capacity,
+            emissions=self.carbon_emissions_technology_yearly,
         )
 
     def axis_value(self, axis: Axis) -> float:
@@ -919,9 +1261,20 @@ class MGA:
         capex = (
             None if self.cost_capex_yearly is None else self.cost_capex_yearly.solution
         )
+        capacity_stock = None if self.capacity is None else self.capacity.solution
+        emissions = (
+            None
+            if self.carbon_emissions_technology_yearly is None
+            else self.carbon_emissions_technology_yearly.solution
+        )
         return float(
             self._design_axis_terms(
-                axis, self.capacity_addition.solution, flow, capex=capex
+                axis,
+                self.capacity_addition.solution,
+                flow,
+                capex=capex,
+                capacity_stock=capacity_stock,
+                emissions=emissions,
             )
         )
 
@@ -986,8 +1339,13 @@ class MGA:
         """Self-describing metadata for the saved polytope: per-axis kind,
         members, capacity type, period, technologies, physical unit and (for
         normalisation="share") the rounded reference total actually used as
-        scale plus the raw baseline value it was rounded from, alongside the
-        normalisation convention (schema owned by polytope_io)."""
+        scale plus the raw baseline value it was rounded from, or (for
+        normalisation="per_axes") the per-axis-kind reference actually used
+        as scale, alongside the normalisation convention (schema owned by
+        polytope_io). node_capacity_ratio axes additionally report their
+        denominator technology group and the baseline value it was frozen
+        at, regardless of normalisation mode, since that freezing is a
+        property of the axis itself, not of "per_axes"."""
         units = self.optimization_setup.variables.units
         ureg = self.optimization_setup.energy_system.unit_handling.ureg
         return {
@@ -1003,6 +1361,16 @@ class MGA:
                         if axis.technologies is not None
                         else None
                     ),
+                    "denominator_technologies": (
+                        list(axis.denominator_technologies)
+                        if axis.denominator_technologies is not None
+                        else None
+                    ),
+                    "capacity_ratio_denominator_baseline": (
+                        float(self._ratio_denominator_baseline[axis.name])
+                        if axis.kind == NODE_CAPACITY_RATIO
+                        else None
+                    ),
                     "unit": axis_physical_unit(axis, units, ureg),
                     "share_reference_total": (
                         float(self._share_reference_phys[i])
@@ -1012,6 +1380,11 @@ class MGA:
                     "share_reference_total_raw": (
                         float(self._share_reference_phys_raw[i])
                         if self.normalisation == "share" and axis.kind != TOTAL_COST
+                        else None
+                    ),
+                    "per_axes_reference": (
+                        float(self._per_axes_reference[axis.name])
+                        if self.normalisation == "per_axes" and axis.kind != TOTAL_COST
                         else None
                     ),
                 }
@@ -1032,6 +1405,12 @@ class MGA:
                     "full horizon), a separate per-technology-group total "
                     "for node_capex_tech/node_capex_cumulative_tech"
                     if self.normalisation == "share"
+                    else "(per-axis-kind reference, 0) -- "
+                    "node_capex_cumulative divides by a fixed configurable "
+                    "constant, node_capacity_ratio is already a fraction "
+                    "(reference 1), node_carbon_emissions_cumulative divides "
+                    "by the model's carbon_emissions_budget"
+                    if self.normalisation == "per_axes"
                     else "(upper bound, 0)"
                 )
                 + ", the cost axis always (epsilon * c_star, c_star)"
@@ -1122,6 +1501,20 @@ class MGA:
                         f"reference total {ref:.6g}; normalisation='share' "
                         f"requires a positive reference. Remove the axis or "
                         f"use 'relative'/'minmax'/'units'."
+                    )
+                scale.append(ref)
+                offset.append(0.0)
+            elif self.normalisation == "per_axes":
+                # The axis reaches 1 at its own kind's physically-appropriate
+                # reference -- a fixed value per axis kind, not one shared
+                # run-wide total (see __init__'s _per_axes_reference).
+                ref = float(self._per_axes_reference[axis.name])
+                if not np.isfinite(ref) or ref <= 0:
+                    raise RuntimeError(
+                        f"MGA: axis {axis.name!r} has non-positive "
+                        f"per_axes reference {ref:.6g}; normalisation="
+                        f"'per_axes' requires a positive reference. Remove "
+                        f"the axis or use 'relative'/'minmax'/'units'."
                     )
                 scale.append(ref)
                 offset.append(0.0)
@@ -1570,7 +1963,12 @@ def run_mga(
         node_capex_cumulative=axes_cfg.get("node_capex_cumulative"),
         node_capex_by_technology=axes_cfg.get("node_capex_by_technology"),
         node_capex_cumulative_tech=axes_cfg.get("node_capex_cumulative_tech"),
+        node_capacity_ratio=axes_cfg.get("node_capacity_ratio"),
+        node_carbon_emissions_cumulative=axes_cfg.get(
+            "node_carbon_emissions_cumulative"
+        ),
         normalisation=config.get("normalisation", "relative"),
+        per_axes_capex_reference=config.get("per_axes_capex_reference", 15e12),
     )
     mga.setup()
 

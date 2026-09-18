@@ -10,8 +10,11 @@ carrier-import group, a per-node (or per-node-lump) capex group, a per-node
 capex group restricted to all years up to a target calendar year, a per-node
 capex group restricted to a named technology group, a per-node capex group
 restricted to both a target calendar year and a named technology group at
-once, or the total cost -- so all per-axis arrays share one length and one
-order, matching the polytope's columns.
+once, a per-node ratio of two named technology groups' installed capacity at
+a target calendar year, a per-node cumulative carbon-emissions group
+restricted to all years up to a target calendar year, or the total cost --
+so all per-axis arrays share one length and one order, matching the
+polytope's columns.
 
 Schema:
 
@@ -23,6 +26,8 @@ Schema:
                                          node_capex | node_capex_cumulative |
                                          node_capex_tech |
                                          node_capex_cumulative_tech |
+                                         node_capacity_ratio |
+                                         node_carbon_emissions_cumulative |
                                          total_cost
     units           (n_axes,) str        physical unit, "" when unknown
     scale           (n_axes,)            physical = normalised * scale + offset
@@ -54,7 +59,7 @@ Schema:
     run_json        () str               how the run was configured and ended
 
 Normalisation is affine and per axis: physical = normalised * scale + offset.
-Four conventions exist, selected per run by `plugins.mga.normalisation`:
+Five conventions exist, selected per run by `plugins.mga.normalisation`:
 "relative" (default) uses scale = upper bound, offset = 0 for design axes, so
 each reaches 1 at its near-optimal maximum; "minmax" uses scale = upper -
 lower bound, offset = lower bound, so each design axis spans exactly [0, 1]
@@ -72,9 +77,19 @@ own technology group's total (also summed over every node and the full
 horizon, regardless of the latter's own until_year). Both the rounded total
 actually used and the raw, unrounded value it was rounded from are recorded
 per axis in axis_meta_json (as share_reference_total /
-share_reference_total_raw). All conventions normalise the cost axis
-identically: scale = epsilon * c_star, offset = c_star, so 0 is the cost
-optimum and 1 the near-optimality budget.
+share_reference_total_raw). "per_axes" (node_capex_cumulative,
+node_capacity_ratio and node_carbon_emissions_cumulative axes only) uses
+scale = a per-axis-kind reference rather than one shared run-wide total:
+node_capex_cumulative divides by a fixed configurable constant
+(`plugins.mga.per_axes_capex_reference`, default 15e12); node_capacity_ratio
+is already a fraction (its denominator technology group's capacity is frozen
+at the baseline design z*, per axis -- see axes.py's Axis docstring) and so
+uses scale = 1; node_carbon_emissions_cumulative divides by the model's own
+`carbon_emissions_budget` parameter. offset = 0 for all three. The reference
+actually used is recorded per axis in axis_meta_json as per_axes_reference.
+All conventions normalise the cost axis identically: scale = epsilon *
+c_star, offset = c_star, so 0 is the cost optimum and 1 the near-optimality
+budget.
 Which convention produced a given file is recorded in run_json. scale/offset
 are stored explicitly (rather than re-derived from bounds_phys) because they
 do not follow one rule.
@@ -93,6 +108,8 @@ NODE_CAPEX = "node_capex"
 NODE_CAPEX_CUMULATIVE = "node_capex_cumulative"
 NODE_CAPEX_TECH = "node_capex_tech"
 NODE_CAPEX_CUMULATIVE_TECH = "node_capex_cumulative_tech"
+NODE_CAPACITY_RATIO = "node_capacity_ratio"
+NODE_CARBON_EMISSIONS_CUMULATIVE = "node_carbon_emissions_cumulative"
 TOTAL_COST = "total_cost"
 
 # Every key the schema defines; save_polytope writes all of them.

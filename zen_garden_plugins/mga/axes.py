@@ -15,10 +15,12 @@ from dataclasses import dataclass
 import numpy as np
 
 from .polytope_io import (
+    NODE_CAPACITY_RATIO,
     NODE_CAPEX,
     NODE_CAPEX_CUMULATIVE,
     NODE_CAPEX_CUMULATIVE_TECH,
     NODE_CAPEX_TECH,
+    NODE_CARBON_EMISSIONS_CUMULATIVE,
     TECH_CAPACITY,
     TOTAL_COST,
 )
@@ -42,15 +44,40 @@ class Axis:
     combine both restrictions at once (`period` and `technologies` both
     set); every node-capex kind weights each sampled year's capex by the
     same discount/interval-expansion factor ZEN-garden's own
-    net_present_cost uses (see plugin.py's _capex_npc_discount_factors), so
-    it is on the same accounting basis as the single TOTAL_COST axis, which
-    is the model's net present cost and has no members. capacity_type is
-    the "+"-joined selected type(s) for tech
-    axes and None otherwise. period is (None, until_year) for
-    NODE_CAPEX_CUMULATIVE and NODE_CAPEX_CUMULATIVE_TECH axes -- the leading
-    None means "no lower bound, from the first model year" -- and None
-    otherwise. technologies is the selected technology group for
-    NODE_CAPEX_TECH and NODE_CAPEX_CUMULATIVE_TECH axes and None otherwise.
+    net_present_cost uses (see plugin.py's _year_interval_expansion_factors),
+    so it is on the same accounting basis as the single TOTAL_COST axis,
+    which is the model's net present cost and has no members.
+    NODE_CARBON_EMISSIONS_CUMULATIVE axes sum carbon_emissions_technology
+    (annualised) over the member nodes, restricted to every model year up
+    to and including `period[1]`, exactly like NODE_CAPEX_CUMULATIVE but
+    interval-expanded only (no discounting -- emissions aren't discounted).
+    NODE_CAPACITY_RATIO axes are numerator_capacity / denominator_capacity
+    at one member node and one snapshot calendar year: the numerator is the
+    live installed `capacity` of the `technologies` group at that node/year;
+    the denominator is the `denominator_technologies` group's installed
+    capacity at that same node/year, but FROZEN at its value on the
+    cost-optimal baseline design z* (computed once, per axis, in
+    plugin.py's MGA.__init__) rather than recomputed for each explored
+    design -- both technology groups are decision-variable sums, so a live
+    ratio of the two would be a genuine nonlinear term and could not serve
+    as an LP objective/projection/support-function term the way every other
+    axis does. `period` is reused here as `(year, year)` to select the one
+    relevant `set_time_steps_yearly` index via the existing
+    `_year_indices_in_period` helper, rather than adding a separate
+    single-year field.
+    capacity_type is the "+"-joined selected type(s) for tech
+    axes and None otherwise; for NODE_CAPACITY_RATIO axes it is the type
+    shared by both the numerator and denominator technology groups (the two
+    are required to match). period is (None, until_year) for
+    NODE_CAPEX_CUMULATIVE, NODE_CAPEX_CUMULATIVE_TECH and
+    NODE_CARBON_EMISSIONS_CUMULATIVE axes -- the leading None means "no
+    lower bound, from the first model year" -- (year, year) for
+    NODE_CAPACITY_RATIO axes, and None otherwise. technologies is the
+    selected technology group for NODE_CAPEX_TECH and
+    NODE_CAPEX_CUMULATIVE_TECH axes, the numerator technology group for
+    NODE_CAPACITY_RATIO axes, and None otherwise. denominator_technologies
+    is the denominator technology group for NODE_CAPACITY_RATIO axes and
+    None for every other kind.
     """
 
     name: str
@@ -59,6 +86,7 @@ class Axis:
     capacity_type: str | None
     period: tuple[int | None, int] | None = None
     technologies: tuple[str, ...] | None = None
+    denominator_technologies: tuple[str, ...] | None = None
 
 
 def build_axis_groups(
@@ -70,6 +98,8 @@ def build_axis_groups(
     node_capex_cumulative=None,
     node_capex_by_technology=None,
     node_capex_cumulative_tech=None,
+    node_capacity_ratio=None,
+    node_carbon_emissions_cumulative=None,
     all_nodes=(),
 ):
     """Turn the axis config lists into ordered (name, members) groups.
@@ -77,9 +107,11 @@ def build_axis_groups(
     Returns (tech_groups, carrier_groups, node_capex_groups,
     node_capex_cumulative_axes, node_capex_tech_axes,
     node_capex_cumulative_chains, node_capex_cumulative_tech_axes,
-    node_capex_cumulative_tech_chains): the first three are (name, [members])
-    tuples in the user's order; node_capex_cumulative_axes is a list of
-    (name, [members], until_year) tuples, one per (node/node-lump,
+    node_capex_cumulative_tech_chains, node_capacity_ratio_axes,
+    node_carbon_emissions_cumulative_axes,
+    node_carbon_emissions_cumulative_chains): the first three are (name,
+    [members]) tuples in the user's order; node_capex_cumulative_axes is a
+    list of (name, [members], until_year) tuples, one per (node/node-lump,
     until_year) combination named f"{name}_until_{until_year}", iterated
     nodes-major/until-years-minor (config order); node_capex_tech_axes is a
     list of (name, [node members], [technology members]) tuples, one per
@@ -99,7 +131,17 @@ def build_axis_groups(
     axis names sorted ascending by until_year -- the chains used to
     constrain each (node, technology-group) pair's cumulative capex to be
     monotonically non-decreasing, without comparing across technology
-    groups.
+    groups. node_capacity_ratio_axes is a list of (name, [node members],
+    [numerator technology members], [denominator technology members], year)
+    tuples, one per (node/node-lump, ratio-group, year) combination named
+    f"{node_name}_{ratio_name}_{year}", iterated
+    nodes-major/ratio-groups-middle/years-minor (config order); unlike every
+    cumulative kind, this axis has no associated chains list -- a ratio is
+    not expected to be monotone across years. node_carbon_emissions_cumulative_axes
+    and node_carbon_emissions_cumulative_chains mirror
+    node_capex_cumulative_axes/node_capex_cumulative_chains exactly (same
+    shape, same nodes-major/until-years-minor order, same monotonicity
+    reasoning), but for cumulative carbon emissions instead of capex.
     """
     tech_set, carrier_set, node_set = (
         set(all_technologies),
@@ -249,6 +291,101 @@ def build_axis_groups(
         for tech_name, _ in cct_tech_groups
     ]
 
+    node_capacity_ratio = node_capacity_ratio or {}
+    ratio_node_groups = _parse_axis_list(
+        node_capacity_ratio.get("nodes"),
+        node_set,
+        all_names,
+        "axes.node_capacity_ratio.nodes",
+    )
+    have_ratio_nodes = bool(ratio_node_groups)
+    have_ratio_years = bool(node_capacity_ratio.get("years"))
+    have_ratio_groups = bool(node_capacity_ratio.get("ratio_groups"))
+    if have_ratio_nodes and not (have_ratio_years and have_ratio_groups):
+        raise ValueError(
+            "MGA axes.node_capacity_ratio: 'nodes' given without 'years' "
+            "and/or 'ratio_groups'."
+        )
+    if have_ratio_years and not (have_ratio_nodes and have_ratio_groups):
+        raise ValueError(
+            "MGA axes.node_capacity_ratio: 'years' given without 'nodes' "
+            "and/or 'ratio_groups'."
+        )
+    if have_ratio_groups and not (have_ratio_nodes and have_ratio_years):
+        raise ValueError(
+            "MGA axes.node_capacity_ratio: 'ratio_groups' given without "
+            "'nodes' and/or 'years'."
+        )
+    ratio_years = (
+        _parse_until_years_list(
+            node_capacity_ratio["years"], "axes.node_capacity_ratio.years"
+        )
+        if have_ratio_nodes
+        else []
+    )
+    ratio_groups = (
+        _parse_ratio_groups(
+            node_capacity_ratio["ratio_groups"],
+            tech_set,
+            all_names,
+            "axes.node_capacity_ratio.ratio_groups",
+        )
+        if have_ratio_nodes
+        else []
+    )
+    node_capacity_ratio_axes = [
+        (
+            f"{node_name}_{ratio_name}_{year}",
+            node_members,
+            numerator_members,
+            denominator_members,
+            year,
+        )
+        for node_name, node_members in ratio_node_groups
+        for ratio_name, numerator_members, denominator_members in ratio_groups
+        for year in ratio_years
+    ]
+
+    node_carbon_emissions_cumulative = node_carbon_emissions_cumulative or {}
+    emissions_node_groups = _parse_axis_list(
+        node_carbon_emissions_cumulative.get("nodes"),
+        node_set,
+        all_names,
+        "axes.node_carbon_emissions_cumulative.nodes",
+    )
+    if emissions_node_groups and not node_carbon_emissions_cumulative.get(
+        "until_years"
+    ):
+        raise ValueError(
+            "MGA axes.node_carbon_emissions_cumulative: 'nodes' given "
+            "without 'until_years'."
+        )
+    if (
+        node_carbon_emissions_cumulative.get("until_years")
+        and not emissions_node_groups
+    ):
+        raise ValueError(
+            "MGA axes.node_carbon_emissions_cumulative: 'until_years' given "
+            "without 'nodes'."
+        )
+    emissions_until_years = (
+        _parse_until_years_list(
+            node_carbon_emissions_cumulative["until_years"],
+            "axes.node_carbon_emissions_cumulative.until_years",
+        )
+        if emissions_node_groups
+        else []
+    )
+    node_carbon_emissions_cumulative_axes = [
+        (f"{name}_until_{until_year}", members, until_year)
+        for name, members in emissions_node_groups
+        for until_year in emissions_until_years
+    ]
+    node_carbon_emissions_cumulative_chains = [
+        [f"{name}_until_{until_year}" for until_year in sorted(emissions_until_years)]
+        for name, _ in emissions_node_groups
+    ]
+
     generated_names = (
         [n for n, _ in tech_groups]
         + [n for n, _ in carrier_groups]
@@ -256,6 +393,8 @@ def build_axis_groups(
         + [n for n, _, _ in node_capex_cumulative_axes]
         + [n for n, _, _ in node_capex_tech_axes]
         + [n for n, _, _, _ in node_capex_cumulative_tech_axes]
+        + [n for n, _, _, _, _ in node_capacity_ratio_axes]
+        + [n for n, _, _ in node_carbon_emissions_cumulative_axes]
     )
     duplicates = {n for n in generated_names if generated_names.count(n) > 1}
     if duplicates:
@@ -272,6 +411,9 @@ def build_axis_groups(
         node_capex_cumulative_chains,
         node_capex_cumulative_tech_axes,
         node_capex_cumulative_tech_chains,
+        node_capacity_ratio_axes,
+        node_carbon_emissions_cumulative_axes,
+        node_carbon_emissions_cumulative_chains,
     )
 
 
@@ -351,6 +493,64 @@ def _parse_axis_list(entries, valid_members, reserved_names, label):
     return groups
 
 
+def _parse_ratio_groups(entries, valid_members, reserved_names, label):
+    """Parse one node_capacity_ratio.ratio_groups config list.
+
+    Each entry is a single-key dict ``{group_name: {"numerator": [...],
+    "denominator": [...]}}``. Unlike `_parse_axis_list`, membership is NOT
+    exclusive across entries or between a group's own numerator and
+    denominator: a numerator technology appearing in its own denominator
+    (e.g. "BEV" in both) is the expected, normal case for a capacity-share
+    axis, not a modelling error. Returns a list of (name, [numerator
+    members], [denominator members]) tuples, in the given order.
+    """
+    groups = []
+    seen_names = set()
+    unknown = []
+    for entry in entries or []:
+        if not (isinstance(entry, dict) and len(entry) == 1):
+            raise ValueError(
+                f"MGA {label}: invalid entry {entry!r}, expected a single "
+                f"{{group: {{'numerator': [...], 'denominator': [...]}}}} dict."
+            )
+        name, spec = next(iter(entry.items()))
+        if name in reserved_names:
+            raise ValueError(
+                f"MGA {label}: group name {name!r} shadows an existing "
+                f"technology, carrier or node name."
+            )
+        well_formed_spec = isinstance(spec, dict) and set(spec) == {
+            "numerator",
+            "denominator",
+        }
+        if well_formed_spec:
+            numerator, denominator = spec["numerator"], spec["denominator"]
+            well_formed_spec = (
+                isinstance(numerator, list)
+                and numerator
+                and all(isinstance(m, str) and m for m in numerator)
+                and isinstance(denominator, list)
+                and denominator
+                and all(isinstance(m, str) and m for m in denominator)
+            )
+        if not (isinstance(name, str) and name and well_formed_spec):
+            raise ValueError(
+                f"MGA {label}: invalid entry {entry!r}, expected a single "
+                f"{{group: {{'numerator': [...], 'denominator': [...]}}}} dict "
+                f"with non-empty member lists."
+            )
+        if name in seen_names:
+            raise ValueError(f"MGA {label}: duplicate ratio-group name {name!r}.")
+        seen_names.add(name)
+        for member in set(numerator) | set(denominator):
+            if member not in valid_members:
+                unknown.append(member)
+        groups.append((name, list(numerator), list(denominator)))
+    if unknown:
+        raise ValueError(f"MGA {label}: unknown names {sorted(set(unknown))}")
+    return groups
+
+
 def axis_physical_unit(axis, units, ureg):
     """Physical unit string of one axis value, or None if unavailable.
 
@@ -358,9 +558,13 @@ def axis_physical_unit(axis, units, ureg):
     carrier axes annualise the instantaneous flow_import unit (x hour); node
     capex axes (cumulative- or technology-restricted or not) read
     cost_capex_yearly's unit at the member nodes, additionally masked to the
-    member technologies when set; the cost axis reads COST_VARIABLE's unit.
-    Heterogeneous lumps yield a ' + '-joined string. `units` is the model's
-    variable-unit mapping, which is empty when unit tracking is switched off.
+    member technologies when set; node carbon-emissions-cumulative axes
+    annualise the instantaneous carbon_emissions_technology unit (x hour),
+    same mechanism as carrier axes; node capacity-ratio axes are a ratio of
+    two capacity sums and so report "dimensionless"; the cost axis reads
+    COST_VARIABLE's unit. Heterogeneous lumps yield a ' + '-joined string.
+    `units` is the model's variable-unit mapping, which is empty when unit
+    tracking is switched off.
 
     The unit series are indexed by ZEN-garden's documentation names for the
     dimensions ("technology", "capacity_type", "carrier", "location"), which
@@ -373,6 +577,9 @@ def axis_physical_unit(axis, units, ureg):
             return None
         found = sorted({str(u) for u in np.atleast_1d(np.asarray(series))})
         return " + ".join(found) if found else None
+
+    if axis.kind == NODE_CAPACITY_RATIO:
+        return "dimensionless"
 
     if axis.kind == TECH_CAPACITY:
         series = units.get("capacity_addition")
@@ -401,12 +608,30 @@ def axis_physical_unit(axis, units, ureg):
         found = sorted({str(u) for u in series[mask].to_numpy()})
         return " + ".join(found) if found else None
 
+    if axis.kind == NODE_CARBON_EMISSIONS_CUMULATIVE:
+        series = units.get("carbon_emissions_technology")
+        if series is None:
+            return None
+        mask = series.index.get_level_values("location").isin(axis.members)
+        return _annualised_unit(series, mask, ureg)
+
     # CARRIER_IMPORT: flow_import is an instantaneous rate, while the axis is
     # the duration-weighted annual import, so the unit gains an hour.
     series = units.get("flow_import")
     if series is None:
         return None
     mask = series.index.get_level_values("carrier").isin(axis.members)
+    return _annualised_unit(series, mask, ureg)
+
+
+def _annualised_unit(series, mask, ureg):
+    """Duration-weighted-annual unit string of an instantaneous-rate series.
+
+    Shared by CARRIER_IMPORT (flow_import) and
+    NODE_CARBON_EMISSIONS_CUMULATIVE (carbon_emissions_technology): both
+    variables are instantaneous rates, while their axis is a
+    duration-weighted annual sum, so the unit gains an hour.
+    """
     annual = set()
     for unit in {str(u) for u in series[mask].to_numpy()}:
         try:
