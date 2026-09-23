@@ -536,9 +536,12 @@ class MGA:
                 node_capex...], "until_years": [2030, 2040, ...]}. Produces
                 one axis per (node/lump, until_year) combination, named
                 f"{name}_until_{until_year}"; interval-expanded but not
-                discounted (unlike the capex axes). Axes sharing a node/lump
-                group are constrained to be monotonically non-decreasing
-                (see build_initial_outer_approximation()).
+                discounted (unlike the capex axes). Unlike node_capex_cumulative,
+                axes sharing a node/lump group are NOT constrained to be
+                monotonically non-decreasing: carbon_emissions_technology is
+                unbounded below in ZEN-garden, so a negative-emission
+                technology (e.g. DAC) can make cumulative emissions fall as
+                later years are added.
             normalisation: "relative" (default) scales design axes by their
                 near-optimal maximum; "minmax" maps each axis's own
                 near-optimal [min, max] onto [0, 1]; "units" reports them in
@@ -618,11 +621,18 @@ class MGA:
         # ascending until_year/year), used by build_initial_outer_approximation
         # to add monotonicity rows; empty when there are no such axes.
         # node_capacity_ratio has no chains -- a ratio is not expected to be
-        # monotonic across years.
+        # monotonic across years. node_carbon_emissions_cumulative_chains is
+        # deliberately excluded here: the monotonicity premise ("a wider
+        # until_year window can only sum to something larger") relies on the
+        # underlying per-period variable being non-negative, which holds for
+        # cost_capex_yearly but not for carbon_emissions_technology /
+        # carbon_emissions_technology_total (unbounded below in ZEN-garden) --
+        # a negative-emission technology such as DAC can make a node's net
+        # emissions fall as later years are added, so treating these chains
+        # as monotone would wrongly exclude feasible (possibly optimal)
+        # points, including z*.
         self._monotone_capex_chains = (
-            node_capex_cumulative_chains
-            + node_capex_cumulative_tech_chains
-            + node_carbon_emissions_cumulative_chains
+            node_capex_cumulative_chains + node_capex_cumulative_tech_chains
         )
 
         # The single source of truth for axis order everywhere downstream
@@ -1628,12 +1638,19 @@ class MGA:
         Two rows per axis, lower and upper, uniformly for design and cost
         axes: -z_i <= -lower_i and z_i <= upper_i in physical units. Plus,
         for every consecutive pair (earlier, later) in each chain of
-        `self._monotone_capex_chains`, one row z_phys(earlier) <=
-        z_phys(later): cost_capex_yearly is non-negative and each
-        cumulative-capex axis's year window nests inside the next, so this
-        holds for every feasible model point and is a free tightening of the
-        outer approximation, not an extra restriction on the model. Each raw
-        row a^T z_phys <= b maps to normalised coordinates via
+        `self._monotone_capex_chains` -- built from node_capex_cumulative_chains
+        and node_capex_cumulative_tech_chains only -- one row
+        z_phys(earlier) <= z_phys(later): cost_capex_yearly is non-negative
+        and each cumulative-capex axis's year window nests inside the next,
+        so this holds for every feasible model point and is a free tightening
+        of the outer approximation, not an extra restriction on the model.
+        node_carbon_emissions_cumulative chains are deliberately excluded
+        from `self._monotone_capex_chains` (see __init__): the underlying
+        carbon_emissions_technology variables are unbounded below, so
+        cumulative emissions can fall as the until_year window widens once
+        negative-emission technologies (e.g. DAC) are deployed, and the
+        monotonicity premise does not hold for them. Each raw row
+        a^T z_phys <= b maps to normalised coordinates via
         z_phys = offset + diag(scale) z_norm, i.e. it becomes
         (a o scale)^T z_norm <= b - a^T offset, and the rows are then scaled
         to unit length (see normalise_rows). The result is exactly the box

@@ -1908,6 +1908,47 @@ def test_build_initial_outer_approximation_adds_no_rows_without_capex_chains():
     assert A0.shape[0] == 2 * stub.n_z
 
 
+def test_build_initial_outer_approximation_ignores_carbon_emissions_chains():
+    """Regression test: node_carbon_emissions_cumulative chains must not
+    contribute monotonicity rows. carbon_emissions_technology is unbounded
+    below in ZEN-garden, so cumulative emissions can fall between
+    until_years once a negative-emission technology like DAC is deployed;
+    treating these chains as monotone previously excluded a genuinely
+    feasible/optimal z* (see plugin.py's __init__)."""
+    z_names = [
+        "DE_until_2030", "DE_until_2040",          # capex chain: still monotone
+        "DE_co2_until_2030", "DE_co2_until_2040",  # emissions chain: NOT monotone
+    ]
+    bounds_phys = np.array(
+        [[0.0, 100.0], [0.0, 200.0], [-50.0, 100.0], [-50.0, 100.0]]
+    )
+    scale = bounds_phys[:, 1]
+    offset = np.zeros(4)
+    stub = SimpleNamespace(
+        n_z=4,
+        z_names=z_names,
+        bounds_phys=bounds_phys,
+        scale=scale,
+        offset=offset,
+        # physical z*: capex rises 50 -> 100 (still monotone); emissions
+        # falls 20 -> -10 (DAC-style net-negative later year) -- this would
+        # violate a monotonicity row if one were (wrongly) added.
+        z_star_norm=np.array([0.5, 0.5, 0.2, -0.1]),
+        # Mirrors the fixed MGA.__init__: only capex-derived chains are
+        # monotone; the emissions chain is present in z_names/bounds but
+        # deliberately absent here.
+        _monotone_capex_chains=[["DE_until_2030", "DE_until_2040"]],
+    )
+    A0, b0 = MGA.build_initial_outer_approximation(stub)  # must not raise
+    assert A0.shape[0] == 2 * stub.n_z + 1  # exactly one monotonicity row
+    index = {name: i for i, name in enumerate(stub.z_names)}
+    mono_row = A0[-1]
+    assert mono_row[index["DE_until_2030"]] > 0
+    assert mono_row[index["DE_until_2040"]] < 0
+    assert mono_row[index["DE_co2_until_2030"]] == 0
+    assert mono_row[index["DE_co2_until_2040"]] == 0
+
+
 # ----------------------------------------------------------- row normalisation
 
 

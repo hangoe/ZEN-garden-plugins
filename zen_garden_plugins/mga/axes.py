@@ -139,9 +139,13 @@ def build_axis_groups(
     cumulative kind, this axis has no associated chains list -- a ratio is
     not expected to be monotone across years. node_carbon_emissions_cumulative_axes
     and node_carbon_emissions_cumulative_chains mirror
-    node_capex_cumulative_axes/node_capex_cumulative_chains exactly (same
-    shape, same nodes-major/until-years-minor order, same monotonicity
-    reasoning), but for cumulative carbon emissions instead of capex.
+    node_capex_cumulative_axes/node_capex_cumulative_chains in shape and
+    order only (same nodes-major/until-years-minor iteration), but the
+    emissions chains are NOT used to build monotonicity rows in plugin.py's
+    build_initial_outer_approximation(): carbon_emissions_technology is
+    unbounded below in ZEN-garden, unlike cost_capex_yearly, so cumulative
+    emissions are not guaranteed non-decreasing across until_year and the
+    monotonicity reasoning that holds for capex does not carry over.
     """
     tech_set, carrier_set, node_set = (
         set(all_technologies),
