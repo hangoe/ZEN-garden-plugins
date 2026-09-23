@@ -1449,10 +1449,24 @@ class MGA:
         """
         if supplied_bounds is None:
             upper = self.solve_extreme_lps("max")
+            lower = self.solve_extreme_lps("min")
             # Axis values are sums of non-negative variables (capacity_addition,
             # flow_import and cost_capex_yearly are all bounds=(0, inf) in
-            # ZEN-garden), so a negative minimum can only be solver round-off.
-            lower = np.maximum(0.0, self.solve_extreme_lps("min"))
+            # ZEN-garden), so a negative minimum can only be solver round-off
+            # -- except for node_carbon_emissions_cumulative, whose underlying
+            # carbon_emissions_technology is unbounded below (see
+            # build_initial_outer_approximation and __init__'s
+            # _monotone_capex_chains comment): a negative-emission technology
+            # such as DAC can legitimately drive cumulative emissions below
+            # zero, including at z*, so clipping those axes here would wrongly
+            # exclude z* from the initial outer approximation.
+            non_negative = np.array(
+                [
+                    axis.kind != NODE_CARBON_EMISSIONS_CUMULATIVE
+                    for axis in self.design_axes
+                ]
+            )
+            lower = np.where(non_negative, np.maximum(0.0, lower), lower)
         else:
             lower, upper = self._read_supplied_bounds(supplied_bounds)
 
