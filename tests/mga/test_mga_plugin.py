@@ -1869,6 +1869,50 @@ def test_share_normalisation_raises_for_non_positive_reference_total():
         MGA.solve_axis_bounds(mga, supplied_bounds={"DE": [10.0, 50.0]})
 
 
+def _emissions_bounds_stub(normalisation):
+    axis = Axis(
+        "DE_co2_until_2030", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE",), None,
+        period=(None, 2030),
+    )
+    mga = SimpleNamespace(
+        axes=[axis],
+        design_axes=[axis],
+        n_z=1,
+        c_star=1000.0,
+        epsilon=0.1,
+        normalisation=normalisation,
+    )
+    mga._read_supplied_bounds = functools.partial(MGA._read_supplied_bounds, mga)
+    return mga
+
+
+def test_minmax_normalisation_accepts_non_positive_emissions_maximum():
+    # Net-negative cumulative emissions over the whole near-optimal range
+    # (e.g. DAC): fine under "minmax", which only needs a positive span.
+    mga = _emissions_bounds_stub("minmax")
+    MGA.solve_axis_bounds(mga, supplied_bounds={"DE_co2_until_2030": [-500.0, -20.0]})
+    assert mga.offset.tolist() == [-500.0]
+    assert mga.scale.tolist() == [480.0]
+    normalised = (mga.bounds_phys - mga.offset[:, None]) / mga.scale[:, None]
+    assert normalised.tolist() == [[0.0, 1.0]]
+
+
+def test_relative_normalisation_still_rejects_non_positive_maximum():
+    mga = _emissions_bounds_stub("relative")
+    with pytest.raises(RuntimeError, match="non-positive near-optimal maximum"):
+        MGA.solve_axis_bounds(
+            mga, supplied_bounds={"DE_co2_until_2030": [-500.0, -20.0]}
+        )
+
+
+def test_minmax_normalisation_rejects_zero_span_emissions_axis():
+    mga = _emissions_bounds_stub("minmax")
+    with pytest.raises(RuntimeError, match="zero near-optimal range"):
+        MGA.solve_axis_bounds(
+            mga, supplied_bounds={"DE_co2_until_2030": [-20.0, -20.0]}
+        )
+
+
 # ------------------------------------------------------- outer approximation
 
 

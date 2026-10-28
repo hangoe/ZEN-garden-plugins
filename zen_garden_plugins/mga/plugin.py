@@ -1279,7 +1279,11 @@ class MGA:
                 continue
             lo, hi = float(lower[design_index]), float(upper[design_index])
             design_index += 1
-            if not np.isfinite(hi) or hi <= 0:
+            # A non-positive maximum only breaks the default ("relative")
+            # scale = hi; "minmax" needs a positive span (checked below), so a
+            # node_carbon_emissions_cumulative axis whose near-optimal maximum
+            # is <= 0 (negative-emission technologies) is still valid there.
+            if not np.isfinite(hi) or (hi <= 0 and self.normalisation != "minmax"):
                 raise RuntimeError(
                     f"MGA: axis {axis.name!r} has non-positive near-optimal "
                     f"maximum {hi:.6g}; remove the axis or supply a positive "
