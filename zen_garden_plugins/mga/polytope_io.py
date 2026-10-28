@@ -27,6 +27,7 @@ Schema:
                                          node_capex_tech |
                                          node_capex_cumulative_tech |
                                          node_capacity_ratio |
+                                         node_output_ratio |
                                          node_carbon_emissions_cumulative |
                                          total_cost
     units           (n_axes,) str        physical unit, "" when unknown
@@ -78,13 +79,15 @@ horizon, regardless of the latter's own until_year). Both the rounded total
 actually used and the raw, unrounded value it was rounded from are recorded
 per axis in axis_meta_json (as share_reference_total /
 share_reference_total_raw). "per_axes" (node_capex_cumulative,
-node_capacity_ratio and node_carbon_emissions_cumulative axes only) uses
+node_capacity_ratio, node_output_ratio and node_carbon_emissions_cumulative
+axes only) uses
 scale = a per-axis-kind reference rather than one shared run-wide total:
 node_capex_cumulative divides by a fixed configurable constant
 (`plugins.mga.per_axes_capex_reference`, default 15e12); node_capacity_ratio
 is already a fraction (its denominator technology group's capacity is frozen
 at the baseline design z*, per axis -- see axes.py's Axis docstring) and so
-uses scale = 1; node_carbon_emissions_cumulative divides by the model's own
+uses scale = 1, as does node_output_ratio (same, over delivered output);
+node_carbon_emissions_cumulative divides by the model's own
 `carbon_emissions_budget` parameter. offset = 0 for all three. The reference
 actually used is recorded per axis in axis_meta_json as per_axes_reference.
 All conventions normalise the cost axis identically: scale = epsilon *
@@ -109,6 +112,7 @@ NODE_CAPEX_CUMULATIVE = "node_capex_cumulative"
 NODE_CAPEX_TECH = "node_capex_tech"
 NODE_CAPEX_CUMULATIVE_TECH = "node_capex_cumulative_tech"
 NODE_CAPACITY_RATIO = "node_capacity_ratio"
+NODE_OUTPUT_RATIO = "node_output_ratio"
 NODE_CARBON_EMISSIONS_CUMULATIVE = "node_carbon_emissions_cumulative"
 TOTAL_COST = "total_cost"
 

@@ -14,7 +14,12 @@ import pint
 import pytest
 import xarray as xr
 
-from zen_garden_plugins.mga.axes import Axis, axis_physical_unit, build_axis_groups
+from zen_garden_plugins.mga.axes import (
+    Axis,
+    axis_physical_unit,
+    build_axis_groups,
+    build_output_ratio_axes,
+)
 from zen_garden_plugins.mga.batch_driver import run_batch_mode
 from zen_garden_plugins.mga.oracle_driver import run_oracle_mode
 from zen_garden_plugins.mga.plugin import (
@@ -33,6 +38,7 @@ from zen_garden_plugins.mga.polytope_io import (
     NODE_CAPEX_CUMULATIVE_TECH,
     NODE_CAPEX_TECH,
     NODE_CARBON_EMISSIONS_CUMULATIVE,
+    NODE_OUTPUT_RATIO,
     TECH_CAPACITY,
     TOTAL_COST,
     Polytope,
@@ -2450,3 +2456,237 @@ def test_parameter_registry_survives_pickling_for_spawned_batch_workers():
     registry.__dict__.update(dict_parameters={"a": 1}, docs={})
     restored = pickle.loads(pickle.dumps(registry))
     assert restored.dict_parameters == {"a": 1}
+
+
+# ---------------------------------------------------------------------------
+# node_output_ratio: delivered-output share axes
+# ---------------------------------------------------------------------------
+
+_OUTPUT_RATIO_CFG = {
+    "nodes": ["DE", {"benelux": ["BE", "NL", "LU"]}],
+    "years": [2030, 2040],
+    "ratio_groups": [
+        {"renewables": {"numerator": ["pv"], "denominator": ["pv", "nuclear"]}},
+    ],
+}
+
+
+def test_node_output_ratio_produces_nodes_major_ratio_groups_middle_years_minor_axes():
+    axes = build_output_ratio_axes(_OUTPUT_RATIO_CFG, TECHS, CARRIERS, NODES)
+    assert axes == [
+        ("DE_renewables_2030", ["DE"], ["pv"], ["pv", "nuclear"], 2030),
+        ("DE_renewables_2040", ["DE"], ["pv"], ["pv", "nuclear"], 2040),
+        (
+            "benelux_renewables_2030",
+            ["BE", "NL", "LU"],
+            ["pv"],
+            ["pv", "nuclear"],
+            2030,
+        ),
+        (
+            "benelux_renewables_2040",
+            ["BE", "NL", "LU"],
+            ["pv"],
+            ["pv", "nuclear"],
+            2040,
+        ),
+    ]
+
+
+def test_node_output_ratio_absent_yields_no_axes():
+    assert build_output_ratio_axes(None, TECHS, CARRIERS, NODES) == []
+
+
+@pytest.mark.parametrize(
+    "node_output_ratio",
+    [
+        {"nodes": ["DE"]},  # nodes without years/ratio_groups
+        {"nodes": ["DE"], "years": [2030]},  # missing ratio_groups
+        {
+            "nodes": ["typo"],
+            "years": [2030],
+            "ratio_groups": [{"g": {"numerator": ["pv"], "denominator": ["pv"]}}],
+        },  # unknown node
+        {
+            "nodes": ["DE"],
+            "years": [2030],
+            "ratio_groups": [{"g": {"numerator": ["typo"], "denominator": ["pv"]}}],
+        },  # unknown technology
+        {
+            "nodes": ["DE"],
+            "years": [2030, 2030],
+            "ratio_groups": [{"g": {"numerator": ["pv"], "denominator": ["pv"]}}],
+        },  # duplicate year
+    ],
+)
+def test_invalid_node_output_ratio_configs_are_rejected(node_output_ratio):
+    with pytest.raises(ValueError, match="axes.node_output_ratio"):
+        build_output_ratio_axes(node_output_ratio, TECHS, CARRIERS, NODES)
+
+
+def test_node_output_ratio_axis_name_cannot_collide_with_other_blocks():
+    with pytest.raises(ValueError, match="more than one axes"):
+        build_output_ratio_axes(
+            _OUTPUT_RATIO_CFG,
+            TECHS,
+            CARRIERS,
+            NODES,
+            existing_names=["DE_renewables_2030"],
+        )
+
+
+def test_valid_node_output_ratio_config_passes_and_per_axes_accepts_it():
+    validate_config(
+        {
+            "epsilon": 0.1,
+            "mode": "sampling",
+            "normalisation": "per_axes",
+            "axes": {
+                "node_output_ratio": {
+                    "nodes": ["DE"],
+                    "years": [2030, 2050],
+                    "ratio_groups": [
+                        {"passenger_road_electrification": {
+                            "numerator": ["BEV"],
+                            "denominator": ["BEV", "ICE_petrol"],
+                        }}
+                    ],
+                },
+            },
+            "sampling": {"tolerance_prob": 0.9},
+        }
+    )
+
+
+def _yearly_output_data_array():
+    """Annual flow_conversion_output stand-in: pv/nuclear/wind at DE/CH,
+    model years 0/1; wind outputs nothing anywhere."""
+    data = np.zeros((3, 1, 2, 2))
+    data[0, 0, 0, :] = [30.0, 40.0]  # pv @ DE
+    data[0, 0, 1, :] = [3.0, 4.0]  # pv @ CH
+    data[1, 0, 0, :] = [70.0, 60.0]  # nuclear @ DE
+    data[1, 0, 1, :] = [7.0, 6.0]  # nuclear @ CH
+    return xr.DataArray(
+        data,
+        dims=[
+            "set_conversion_technologies",
+            "set_output_carriers",
+            "set_nodes",
+            "set_years",
+        ],
+        coords={
+            "set_conversion_technologies": ["pv", "nuclear", "wind"],
+            "set_output_carriers": ["electricity"],
+            "set_nodes": ["DE", "CH"],
+            "set_years": [0, 1],
+        },
+    )
+
+
+def _output_ratio_axis(denominator=("pv", "nuclear"), year_index=1):
+    return Axis(
+        "DE_g_2030",
+        NODE_OUTPUT_RATIO,
+        ("DE",),
+        None,
+        period=(year_index, year_index),
+        technologies=("pv",),
+        denominator_technologies=denominator,
+    )
+
+
+@pytest.mark.parametrize("year_index, expected", [(1, 0.4), (0, 0.3)])
+def test_node_output_ratio_axis_divides_own_year_numerator_by_frozen_baseline(
+    year_index, expected
+):
+    stub = SimpleNamespace(
+        _axis_year_indices={"DE_g_2030": [year_index]},
+        _ratio_denominator_baseline={"DE_g_2030": 100.0},
+        _OUTPUT_AGG=MGA._OUTPUT_AGG,
+    )
+    value = MGA._design_axis_terms(
+        stub,
+        _output_ratio_axis(year_index=year_index),
+        None,
+        None,
+        output=_yearly_output_data_array(),
+    )
+    # pv@DE = 40 (year 1) or 30 (year 0), / frozen baseline 100
+    assert float(value) == pytest.approx(expected)
+
+
+def test_output_ratio_denominator_baseline_stays_scoped_to_own_node_and_year():
+    stub = SimpleNamespace(
+        _axis_year_indices={"DE_g_2030": [1]},
+        flow_conversion_output_yearly=SimpleNamespace(
+            solution=_yearly_output_data_array()
+        ),
+    )
+    value = MGA._output_ratio_denominator_baseline(stub, _output_ratio_axis())
+    assert value == pytest.approx(100.0)  # pv@DE (40) + nuclear@DE (60), not CH
+
+
+def test_output_ratio_denominator_baseline_raises_for_non_positive_value():
+    stub = SimpleNamespace(
+        _axis_year_indices={"DE_g_2030": [1]},
+        flow_conversion_output_yearly=SimpleNamespace(
+            solution=_yearly_output_data_array()
+        ),
+    )
+    with pytest.raises(RuntimeError, match="non-positive baseline denominator"):
+        MGA._output_ratio_denominator_baseline(
+            stub, _output_ratio_axis(denominator=("wind",))
+        )
+
+
+def _output_ratio_validation_stub(axis, unit_by_tech):
+    conversion_techs = list(unit_by_tech)
+    variables = {
+        "flow_conversion_output": SimpleNamespace(
+            coords={"set_conversion_technologies": SimpleNamespace(
+                values=np.array(conversion_techs)
+            )}
+        )
+    }
+    units = pd.Series(
+        list(unit_by_tech.values()),
+        index=pd.MultiIndex.from_tuples(
+            [(t, "c", "DE") for t in conversion_techs],
+            names=["set_conversion_technologies", "set_output_carriers", "set_nodes"],
+        ),
+    )
+    return SimpleNamespace(
+        axes=[axis],
+        model=SimpleNamespace(variables=variables),
+        optimization_model=SimpleNamespace(
+            variables=SimpleNamespace(units={"flow_conversion_output": units})
+        ),
+    )
+
+
+def test_output_ratio_validation_accepts_single_output_unit():
+    stub = _output_ratio_validation_stub(
+        _output_ratio_axis(), {"pv": "gigawatt", "nuclear": "gigawatt"}
+    )
+    MGA._validate_output_ratio_axes(stub)
+
+
+def test_output_ratio_validation_rejects_mixed_output_units():
+    stub = _output_ratio_validation_stub(
+        _output_ratio_axis(), {"pv": "megavkm / hour", "nuclear": "megatkm / hour"}
+    )
+    with pytest.raises(ValueError, match="different units"):
+        MGA._validate_output_ratio_axes(stub)
+
+
+def test_output_ratio_validation_rejects_non_conversion_technology():
+    stub = _output_ratio_validation_stub(_output_ratio_axis(), {"pv": "gigawatt"})
+    with pytest.raises(ValueError, match="not conversion technologies"):
+        MGA._validate_output_ratio_axes(stub)
+
+
+def test_node_output_ratio_axis_unit_is_dimensionless():
+    assert (
+        axis_physical_unit(_output_ratio_axis(), {}, pint.UnitRegistry())
+        == "dimensionless"
+    )

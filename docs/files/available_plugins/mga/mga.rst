@@ -165,11 +165,12 @@ defaults below are filled in at load time.
     axes -- each axis *kind* supplies its own, physically-appropriate
     reference: ``node_capex_cumulative`` axes divide by a fixed configurable
     constant, ``per_axes_capex_reference`` (see below); ``node_capacity_ratio``
-    axes are already a fraction of their own baseline denominator (see that
-    axis kind below), so their reference is simply 1; ``node_carbon_emissions_cumulative``
+    and ``node_output_ratio`` axes are already a fraction of their own
+    baseline denominator (see those axis kinds below), so their reference is
+    simply 1; ``node_carbon_emissions_cumulative``
     axes divide by the model's own ``carbon_emissions_budget`` parameter.
     The cost axis is unaffected, as always. It is only supported for these
-    three axis kinds (plus the cost axis) -- a config error is raised if
+    four axis kinds (plus the cost axis) -- a config error is raised if
     ``"per_axes"`` is selected alongside ``technologies``, ``carrier_imports``,
     ``node_capex``, ``node_capex_by_technology`` or ``node_capex_cumulative_tech``
     axes, since none of those has a defined ``per_axes`` reference. The
@@ -291,6 +292,30 @@ defaults below are filled in at load time.
       every cumulative axis kind, these axes are **not** constrained to be
       monotonic across years -- a capacity share can legitimately rise or
       fall year to year.
+
+      Because the numerator is *installed* capacity, the bound LPs can
+      move it by buying capacity that is never used: the near-optimality
+      slack can pay for large amounts of idle electric capacity, so the
+      near-optimal maxima can be many times the capacity the demand
+      actually needs. Use ``node_output_ratio`` when what matters is the
+      share of energy actually delivered.
+    * ``node_output_ratio`` (dict): the same as ``node_capacity_ratio`` --
+      same ``nodes``/``years``/``ratio_groups`` config, same
+      ``<node_or_group>_<ratio_group_name>_<year>`` naming, same frozen
+      baseline denominator, no monotonicity -- but over **delivered
+      energy** instead of installed capacity: the numerator is the annual
+      ``flow_conversion_output`` of the numerator technologies at the
+      axis's node(s) and year, and the denominator is the denominator
+      technologies' annual output there on the baseline design. Idle
+      capacity therefore does not move the axis, and since output is bound
+      by demand the axis stays roughly within [0, 1]. Every member must be
+      a conversion technology (only those have ``flow_conversion_output``),
+      and all members of one ratio group must produce outputs in one unit --
+      e.g. passenger cars (``passenger_mileage``) and trucks
+      (``truck_mileage``) must go into separate groups; a config error is
+      raised otherwise (checked only when ZEN-garden's unit tracking is
+      on). The frozen denominator is recorded per axis in
+      ``axis_meta_json`` as ``output_ratio_denominator_baseline``.
     * ``node_carbon_emissions_cumulative`` (dict): per-node cumulative
       carbon-emissions axes, restricted to every model year up to and
       including a target calendar year -- structurally identical to

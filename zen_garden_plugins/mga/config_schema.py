@@ -61,6 +61,14 @@ class NodeCapacityRatio(ConfigBase):
     ratio_groups: list[dict[str, RatioGroup]] | None = None
 
 
+class NodeOutputRatio(ConfigBase):
+    """axes.node_output_ratio: delivered-output share at snapshot years."""
+
+    nodes: list[AxisEntry] | None = None
+    years: list[int] | None = None
+    ratio_groups: list[dict[str, RatioGroup]] | None = None
+
+
 class NodeCarbonEmissionsCumulative(ConfigBase):
     """axes.node_carbon_emissions_cumulative: emissions up to each until_year."""
 
@@ -79,6 +87,7 @@ class AxesConfig(ConfigBase):
     node_capex_by_technology: NodeCapexByTechnology | None = None
     node_capex_cumulative_tech: NodeCapexCumulativeTech | None = None
     node_capacity_ratio: NodeCapacityRatio | None = None
+    node_output_ratio: NodeOutputRatio | None = None
     node_carbon_emissions_cumulative: NodeCarbonEmissionsCumulative | None = None
 
 
@@ -208,7 +217,8 @@ class Config(ConfigBase):
         ):
             raise ValueError(
                 "MGA: normalisation='per_axes' only supports node_capex_cumulative, "
-                "node_capacity_ratio and node_carbon_emissions_cumulative axes (plus "
+                "node_capacity_ratio, node_output_ratio and "
+                "node_carbon_emissions_cumulative axes (plus "
                 "the cost axis); remove axes.technologies/axes.carrier_imports/"
                 "axes.node_capex/axes.node_capex_by_technology/"
                 "axes.node_capex_cumulative_tech or use a different normalisation."

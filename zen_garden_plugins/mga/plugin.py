@@ -42,8 +42,9 @@ Glossary
                 per-node capex group restricted to a named technology group,
                 a per-node capex group restricted to both a calendar-year
                 span and a named technology group at once, a per-node ratio
-                of two named technology groups' installed capacity at a
-                snapshot calendar year, a per-node cumulative
+                of two named technology groups' installed capacity or
+                delivered output at a snapshot calendar year, a per-node
+                cumulative
                 carbon-emissions group restricted to an explicit
                 calendar-year span, or the total cost (see axes.py)
     n_z         number of axes, cost included -- the dimension of the
@@ -80,12 +81,13 @@ Glossary
                 not a defect; use "minmax" instead when every axis should
                 be explored to the same relative depth regardless of size.
                 Under "per_axes" (NODE_CAPEX_CUMULATIVE,
-                NODE_CAPACITY_RATIO and NODE_CARBON_EMISSIONS_CUMULATIVE
-                axes only), scale = a reference specific to each axis's own
+                NODE_CAPACITY_RATIO, NODE_OUTPUT_RATIO and
+                NODE_CARBON_EMISSIONS_CUMULATIVE axes only), scale = a reference specific to each axis's own
                 kind, not one shared group total: NODE_CAPEX_CUMULATIVE
                 divides by a fixed configurable constant
-                (per_axes_capex_reference), NODE_CAPACITY_RATIO by 1 (it is
-                already a fraction of its own baseline-frozen denominator),
+                (per_axes_capex_reference), NODE_CAPACITY_RATIO and
+                NODE_OUTPUT_RATIO by 1 (each is already a fraction of its
+                own baseline-frozen denominator),
                 and NODE_CARBON_EMISSIONS_CUMULATIVE by the model's own
                 carbon_emissions_budget parameter; offset = 0. The reference
                 actually used is recorded per axis in polytope_metadata().
@@ -114,7 +116,13 @@ from zen_garden.model.component_types.constraint import GenericConstraint
 from zen_garden.plugin_system.events import Event, EventPublisher
 from zen_garden.postprocess.postprocess import Postprocess
 
-from .axes import COST_VARIABLE, Axis, axis_physical_unit, build_axis_groups
+from .axes import (
+    COST_VARIABLE,
+    Axis,
+    axis_physical_unit,
+    build_axis_groups,
+    build_output_ratio_axes,
+)
 from .batch_driver import run_batch_mode
 from .config_schema import Config, validate_config  # noqa: F401 (loader API)
 from .oracle_driver import run_oracle_mode
@@ -126,6 +134,7 @@ from .polytope_io import (
     NODE_CAPEX_CUMULATIVE_TECH,
     NODE_CAPEX_TECH,
     NODE_CARBON_EMISSIONS_CUMULATIVE,
+    NODE_OUTPUT_RATIO,
     TECH_CAPACITY,
     TOTAL_COST,
 )
@@ -252,6 +261,12 @@ class MGA:
     # Dims aggregated away per axis kind, besides the member dim itself.
     _TECH_AGG = ["set_capacity_types", "set_location", "set_years"]
     _CARRIER_AGG = ["set_nodes", "set_time_steps_operation"]
+    _OUTPUT_AGG = [
+        "set_conversion_technologies",
+        "set_output_carriers",
+        "set_nodes",
+        "set_years",
+    ]
     _NODE_AGG_CAPEX = [
         "set_technologies",
         "set_capacity_types",
@@ -271,6 +286,7 @@ class MGA:
         node_capex_by_technology=None,
         node_capex_cumulative_tech=None,
         node_capacity_ratio=None,
+        node_output_ratio=None,
         node_carbon_emissions_cumulative=None,
         normalisation="relative",
         per_axes_capex_reference=15e12,
@@ -325,6 +341,14 @@ class MGA:
                 ratio of two decision-variable sums cannot serve as an LP
                 objective/projection term; axes are not constrained to be
                 monotonic across years.
+            node_output_ratio: Same config shape, naming and frozen-baseline
+                denominator as node_capacity_ratio, but over delivered
+                energy instead of installed capacity: the numerator group's
+                annual flow_conversion_output at the axis's node(s) and
+                year, divided by the denominator group's baseline annual
+                output there. Idle capacity therefore does not move the
+                axis. Every member must be a conversion technology, and all
+                members of one ratio group must share one output unit.
             node_carbon_emissions_cumulative: Per-node cumulative
                 carbon-emissions axes restricted to all model years up to a
                 target calendar year: {"nodes": [...same format as
@@ -350,12 +374,13 @@ class MGA:
                 node_capex_cumulative_tech axes; both the rounded total and
                 the raw value it came from are recorded per axis in
                 polytope_metadata(). "per_axes" (node_capex_cumulative,
-                node_capacity_ratio and node_carbon_emissions_cumulative
-                axes only) reports each axis against its own kind-specific
+                node_capacity_ratio, node_output_ratio and
+                node_carbon_emissions_cumulative axes only) reports each axis against its own kind-specific
                 reference instead of one shared run-wide total:
                 node_capex_cumulative divides by `per_axes_capex_reference`;
-                node_capacity_ratio is already a fraction (reference 1);
-                node_carbon_emissions_cumulative divides by the model's own
+                node_capacity_ratio and node_output_ratio are already
+                fractions (reference 1); node_carbon_emissions_cumulative
+                divides by the model's own
                 carbon_emissions_budget parameter. The cost axis is always
                 budget-relative.
                 See solve_axis_bounds().
@@ -416,6 +441,22 @@ class MGA:
             node_capacity_ratio=node_capacity_ratio,
             node_carbon_emissions_cumulative=node_carbon_emissions_cumulative,
             all_nodes=self.all_nodes,
+        )
+        node_output_ratio_axes = build_output_ratio_axes(
+            node_output_ratio,
+            all_technologies,
+            all_carriers,
+            self.all_nodes,
+            existing_names=[name for group in (
+                tech_groups,
+                carrier_groups,
+                node_capex_groups,
+                node_capex_cumulative_axes,
+                node_capex_tech_axes,
+                node_capex_cumulative_tech_axes,
+                node_capacity_ratio_axes,
+                node_carbon_emissions_cumulative_axes,
+            ) for name, *_ in group],
         )
         # Chains of cumulative axis names (same node/lump group, and for
         # node_capex_cumulative_tech also the same technology group,
@@ -511,6 +552,24 @@ class MGA:
             + [
                 Axis(
                     name,
+                    NODE_OUTPUT_RATIO,
+                    tuple(node_members),
+                    None,
+                    period=(year, year),
+                    technologies=tuple(numerator_members),
+                    denominator_technologies=tuple(denominator_members),
+                )
+                for (
+                    name,
+                    node_members,
+                    numerator_members,
+                    denominator_members,
+                    year,
+                ) in node_output_ratio_axes
+            ]
+            + [
+                Axis(
+                    name,
                     NODE_CARBON_EMISSIONS_CUMULATIVE,
                     tuple(members),
                     None,
@@ -579,6 +638,33 @@ class MGA:
         else:
             self.carbon_emissions_technology_yearly = None
 
+        # Model handle needed by node-output-ratio axes: flow_conversion_output
+        # is a per-operation-step rate, annualised once here the same way as
+        # carbon_emissions_technology above.
+        if any(axis.kind == NODE_OUTPUT_RATIO for axis in self.axes):
+            self._validate_output_ratio_axes()
+            year_op_duration = (
+                GenericConstraint.get_year_time_step_duration_array(optimization_step)
+            )
+            # Only the technologies some output-ratio axis uses, so the
+            # annualised expression stays small.
+            ratio_techs = sorted(
+                {
+                    tech
+                    for axis in self.axes
+                    if axis.kind == NODE_OUTPUT_RATIO
+                    for tech in axis.technologies + axis.denominator_technologies
+                }
+            )
+            self.flow_conversion_output_yearly = (
+                self.model.variables["flow_conversion_output"].sel(
+                    set_conversion_technologies=ratio_techs
+                )
+                * year_op_duration
+            ).sum("set_time_steps_operation")
+        else:
+            self.flow_conversion_output_yearly = None
+
         # period->year-index lookup needed by every axis kind restricted to
         # a calendar-year window (cumulative or single-year snapshot).
         # Sourced directly from the model's own yearly time-step set/
@@ -589,6 +675,7 @@ class MGA:
             NODE_CAPEX_CUMULATIVE,
             NODE_CAPEX_CUMULATIVE_TECH,
             NODE_CAPACITY_RATIO,
+            NODE_OUTPUT_RATIO,
             NODE_CARBON_EMISSIONS_CUMULATIVE,
         )
         self._axis_year_indices: dict[str, list] = {}
@@ -656,6 +743,13 @@ class MGA:
             for axis in self.axes
             if axis.kind == NODE_CAPACITY_RATIO
         }
+        self._ratio_denominator_baseline.update(
+            {
+                axis.name: self._output_ratio_denominator_baseline(axis)
+                for axis in self.axes
+                if axis.kind == NODE_OUTPUT_RATIO
+            }
+        )
 
         # Normalisation convention used by solve_axis_bounds(); the
         # scale/offset it computes below are set once and derived from this.
@@ -736,7 +830,7 @@ class MGA:
             for axis in self.axes:
                 if axis.kind == NODE_CAPEX_CUMULATIVE:
                     ref = float(per_axes_capex_reference)
-                elif axis.kind == NODE_CAPACITY_RATIO:
+                elif axis.kind in (NODE_CAPACITY_RATIO, NODE_OUTPUT_RATIO):
                     ref = 1.0
                 elif axis.kind == NODE_CARBON_EMISSIONS_CUMULATIVE:
                     ref = float(parameters.carbon_emissions_budget)
@@ -958,6 +1052,81 @@ class MGA:
             )
         return value
 
+    def _validate_output_ratio_axes(self):
+        """Check every node_output_ratio axis before building its expression.
+
+        Each numerator/denominator member must be a conversion technology
+        (only those have flow_conversion_output), and all members of one
+        ratio group must share a single output unit -- summing e.g.
+        passenger_mileage and truck_mileage outputs would add incompatible
+        quantities. The unit check is skipped when ZEN-garden's unit
+        tracking (solver.check_unit_consistency) is off.
+        """
+        if "flow_conversion_output" not in self.model.variables:
+            raise ValueError(
+                "MGA node_output_ratio: the model has no flow_conversion_output "
+                "variable (no conversion technologies)."
+            )
+        conversion_techs = set(
+            self.model.variables["flow_conversion_output"]
+            .coords["set_conversion_technologies"]
+            .values
+        )
+        units = self.optimization_model.variables.units.get("flow_conversion_output")
+        if units is None:
+            logging.warning(
+                "MGA node_output_ratio: variable units unavailable "
+                "(unit tracking off); output-unit consistency is not checked."
+            )
+        for axis in self.axes:
+            if axis.kind != NODE_OUTPUT_RATIO:
+                continue
+            members = set(axis.technologies) | set(axis.denominator_technologies)
+            not_conversion = sorted(members - conversion_techs)
+            if not_conversion:
+                raise ValueError(
+                    f"MGA node_output_ratio axis {axis.name!r}: "
+                    f"{not_conversion} are not conversion technologies; only "
+                    f"conversion technologies have flow_conversion_output."
+                )
+            if units is None:
+                continue
+            mask = units.index.get_level_values("set_conversion_technologies").isin(
+                members
+            )
+            found = sorted({str(u) for u in units[mask].to_numpy()})
+            if len(found) > 1:
+                raise ValueError(
+                    f"MGA node_output_ratio axis {axis.name!r}: its technologies "
+                    f"produce outputs in different units {found}; a ratio group "
+                    f"must share one output unit -- split it into separate "
+                    f"groups (e.g. passenger vs. freight transport)."
+                )
+
+    def _output_ratio_denominator_baseline(self, axis: Axis) -> float:
+        """A node_output_ratio axis's frozen denominator: its denominator
+        technology group's annual flow_conversion_output at the axis's own
+        member node(s) and snapshot year, on the baseline (cost-optimal)
+        solution. Same freezing rationale and scoping as
+        `_capacity_ratio_denominator_baseline`.
+        """
+        value = float(
+            self.flow_conversion_output_yearly.solution.sel(
+                set_conversion_technologies=list(axis.denominator_technologies),
+                set_nodes=list(axis.members),
+                set_years=self._axis_year_indices[axis.name],
+            ).sum()
+        )
+        if not np.isfinite(value) or value <= 0:
+            raise RuntimeError(
+                f"MGA: node_output_ratio axis {axis.name!r} has a "
+                f"non-positive baseline denominator {value:.6g} (no member "
+                f"of {axis.denominator_technologies} produces output at "
+                f"{axis.members}/{axis.period[1]} in the baseline design); "
+                f"remove the axis or check its denominator technology group."
+            )
+        return value
+
     def _design_axis_terms(
         self,
         axis: Axis,
@@ -966,6 +1135,7 @@ class MGA:
         capex=None,
         capacity_stock=None,
         emissions=None,
+        output=None,
     ):
         """One design axis over `capacity_addition`/`flow`/`capex`/
         `capacity_stock`/`emissions` data.
@@ -996,6 +1166,8 @@ class MGA:
         its member node(s) and snapshot year, divided by the precomputed,
         baseline-frozen `_ratio_denominator_baseline` scalar for that axis
         (see the Axis class docstring for why the denominator is frozen).
+        NODE_OUTPUT_RATIO axes are the same, but over `output` (the annual
+        flow_conversion_output, see __init__) instead of installed capacity.
         """
         members = list(axis.members)
         if axis.kind == TECH_CAPACITY:
@@ -1019,6 +1191,13 @@ class MGA:
                 )
                 .sum(["set_technologies", "set_capacity_types", "set_location", "set_years"])
             )
+            return numerator / self._ratio_denominator_baseline[axis.name]
+        if axis.kind == NODE_OUTPUT_RATIO:
+            numerator = output.sel(
+                set_conversion_technologies=list(axis.technologies),
+                set_nodes=members,
+                set_years=self._axis_year_indices[axis.name],
+            ).sum(self._OUTPUT_AGG)
             return numerator / self._ratio_denominator_baseline[axis.name]
         if axis.kind == NODE_CARBON_EMISSIONS_CUMULATIVE:
             # Transport technologies have no valid entry at a node-named
@@ -1058,6 +1237,7 @@ class MGA:
             capex=self.cost_capex_yearly,
             capacity_stock=self.capacity,
             emissions=self.carbon_emissions_technology_yearly,
+            output=self.flow_conversion_output_yearly,
         )
 
     def axis_value(self, axis: Axis) -> float:
@@ -1074,6 +1254,11 @@ class MGA:
             if self.carbon_emissions_technology_yearly is None
             else self.carbon_emissions_technology_yearly.solution
         )
+        output = (
+            None
+            if self.flow_conversion_output_yearly is None
+            else self.flow_conversion_output_yearly.solution
+        )
         return float(
             self._design_axis_terms(
                 axis,
@@ -1082,6 +1267,7 @@ class MGA:
                 capex=capex,
                 capacity_stock=capacity_stock,
                 emissions=emissions,
+                output=output,
             )
         )
 
@@ -1149,8 +1335,8 @@ class MGA:
         scale plus the raw baseline value it was rounded from, or (for
         normalisation="per_axes") the per-axis-kind reference actually used
         as scale, alongside the normalisation convention (schema owned by
-        polytope_io). node_capacity_ratio axes additionally report their
-        denominator technology group and the baseline value it was frozen
+        polytope_io). node_capacity_ratio and node_output_ratio axes
+        additionally report their denominator technology group and the baseline value it was frozen
         at, regardless of normalisation mode, since that freezing is a
         property of the axis itself, not of "per_axes"."""
         units = self.optimization_model.variables.units
@@ -1176,6 +1362,11 @@ class MGA:
                     "capacity_ratio_denominator_baseline": (
                         float(self._ratio_denominator_baseline[axis.name])
                         if axis.kind == NODE_CAPACITY_RATIO
+                        else None
+                    ),
+                    "output_ratio_denominator_baseline": (
+                        float(self._ratio_denominator_baseline[axis.name])
+                        if axis.kind == NODE_OUTPUT_RATIO
                         else None
                     ),
                     "unit": axis_physical_unit(axis, units, ureg),
@@ -1815,6 +2006,7 @@ def run_mga(
         node_capex_by_technology=axes_cfg.get("node_capex_by_technology"),
         node_capex_cumulative_tech=axes_cfg.get("node_capex_cumulative_tech"),
         node_capacity_ratio=axes_cfg.get("node_capacity_ratio"),
+        node_output_ratio=axes_cfg.get("node_output_ratio"),
         node_carbon_emissions_cumulative=axes_cfg.get(
             "node_carbon_emissions_cumulative"
         ),

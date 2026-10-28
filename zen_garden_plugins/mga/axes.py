@@ -21,6 +21,7 @@ from .polytope_io import (
     NODE_CAPEX_CUMULATIVE_TECH,
     NODE_CAPEX_TECH,
     NODE_CARBON_EMISSIONS_CUMULATIVE,
+    NODE_OUTPUT_RATIO,
     TECH_CAPACITY,
     TOTAL_COST,
 )
@@ -65,6 +66,11 @@ class Axis:
     relevant `set_years` index via the existing
     `_year_indices_in_period` helper, rather than adding a separate
     single-year field.
+    NODE_OUTPUT_RATIO axes are built the same way (same config shape,
+    `period`, `technologies` and frozen `denominator_technologies`
+    baseline) but over the annual delivered energy (flow_conversion_output)
+    instead of installed capacity, so idle capacity bought with the cost
+    slack does not move them; capacity_type is None for them.
     capacity_type is the "+"-joined selected type(s) for tech
     axes and None otherwise; for NODE_CAPACITY_RATIO axes it is the type
     shared by both the numerator and denominator technology groups (the two
@@ -295,60 +301,13 @@ def build_axis_groups(
         for tech_name, _ in cct_tech_groups
     ]
 
-    node_capacity_ratio = node_capacity_ratio or {}
-    ratio_node_groups = _parse_axis_list(
-        node_capacity_ratio.get("nodes"),
+    node_capacity_ratio_axes = _parse_ratio_block(
+        node_capacity_ratio,
+        tech_set,
         node_set,
         all_names,
-        "axes.node_capacity_ratio.nodes",
+        "axes.node_capacity_ratio",
     )
-    have_ratio_nodes = bool(ratio_node_groups)
-    have_ratio_years = bool(node_capacity_ratio.get("years"))
-    have_ratio_groups = bool(node_capacity_ratio.get("ratio_groups"))
-    if have_ratio_nodes and not (have_ratio_years and have_ratio_groups):
-        raise ValueError(
-            "MGA axes.node_capacity_ratio: 'nodes' given without 'years' "
-            "and/or 'ratio_groups'."
-        )
-    if have_ratio_years and not (have_ratio_nodes and have_ratio_groups):
-        raise ValueError(
-            "MGA axes.node_capacity_ratio: 'years' given without 'nodes' "
-            "and/or 'ratio_groups'."
-        )
-    if have_ratio_groups and not (have_ratio_nodes and have_ratio_years):
-        raise ValueError(
-            "MGA axes.node_capacity_ratio: 'ratio_groups' given without "
-            "'nodes' and/or 'years'."
-        )
-    ratio_years = (
-        _parse_until_years_list(
-            node_capacity_ratio["years"], "axes.node_capacity_ratio.years"
-        )
-        if have_ratio_nodes
-        else []
-    )
-    ratio_groups = (
-        _parse_ratio_groups(
-            node_capacity_ratio["ratio_groups"],
-            tech_set,
-            all_names,
-            "axes.node_capacity_ratio.ratio_groups",
-        )
-        if have_ratio_nodes
-        else []
-    )
-    node_capacity_ratio_axes = [
-        (
-            f"{node_name}_{ratio_name}_{year}",
-            node_members,
-            numerator_members,
-            denominator_members,
-            year,
-        )
-        for node_name, node_members in ratio_node_groups
-        for ratio_name, numerator_members, denominator_members in ratio_groups
-        for year in ratio_years
-    ]
 
     node_carbon_emissions_cumulative = node_carbon_emissions_cumulative or {}
     emissions_node_groups = _parse_axis_list(
@@ -419,6 +378,92 @@ def build_axis_groups(
         node_carbon_emissions_cumulative_axes,
         node_carbon_emissions_cumulative_chains,
     )
+
+
+def _parse_ratio_block(block, tech_set, node_set, reserved_names, label):
+    """Parse one ratio-axis config block (node_capacity_ratio or
+    node_output_ratio): its `nodes`, `years` and `ratio_groups` lists.
+
+    All three keys must be given together, or none of them. Returns a list
+    of (name, [node members], [numerator technology members], [denominator
+    technology members], year) tuples, one per (node/node-lump,
+    ratio-group, year) combination named f"{node_name}_{ratio_name}_{year}",
+    iterated nodes-major/ratio-groups-middle/years-minor (config order).
+    """
+    block = block or {}
+    node_groups = _parse_axis_list(
+        block.get("nodes"), node_set, reserved_names, f"{label}.nodes"
+    )
+    have_nodes = bool(node_groups)
+    have_years = bool(block.get("years"))
+    have_groups = bool(block.get("ratio_groups"))
+    if have_nodes and not (have_years and have_groups):
+        raise ValueError(
+            f"MGA {label}: 'nodes' given without 'years' and/or 'ratio_groups'."
+        )
+    if have_years and not (have_nodes and have_groups):
+        raise ValueError(
+            f"MGA {label}: 'years' given without 'nodes' and/or 'ratio_groups'."
+        )
+    if have_groups and not (have_nodes and have_years):
+        raise ValueError(
+            f"MGA {label}: 'ratio_groups' given without 'nodes' and/or 'years'."
+        )
+    if not have_nodes:
+        return []
+    years = _parse_until_years_list(block["years"], f"{label}.years")
+    groups = _parse_ratio_groups(
+        block["ratio_groups"], tech_set, reserved_names, f"{label}.ratio_groups"
+    )
+    return [
+        (
+            f"{node_name}_{ratio_name}_{year}",
+            node_members,
+            numerator_members,
+            denominator_members,
+            year,
+        )
+        for node_name, node_members in node_groups
+        for ratio_name, numerator_members, denominator_members in groups
+        for year in years
+    ]
+
+
+def build_output_ratio_axes(
+    node_output_ratio,
+    all_technologies,
+    all_carriers,
+    all_nodes,
+    existing_names=(),
+):
+    """Parse axes.node_output_ratio into axis tuples.
+
+    Same config shape, naming and iteration order as node_capacity_ratio
+    (see `_parse_ratio_block`), returned as a list of (name, [node
+    members], [numerator technology members], [denominator technology
+    members], year) tuples. Kept separate from `build_axis_groups` so its
+    return shape stays stable; `existing_names` are the axis names that
+    function generated, and a collision with any of them is rejected the
+    same way `build_axis_groups` rejects collisions between its own blocks.
+    """
+    tech_set, carrier_set, node_set = (
+        set(all_technologies),
+        set(all_carriers),
+        set(all_nodes),
+    )
+    axes = _parse_ratio_block(
+        node_output_ratio,
+        tech_set,
+        node_set,
+        tech_set | carrier_set | node_set,
+        "axes.node_output_ratio",
+    )
+    clashes = sorted({name for name, *_ in axes} & set(existing_names))
+    if clashes:
+        raise ValueError(
+            f"MGA: axis name(s) {clashes} used in more than one axes.* block."
+        )
+    return axes
 
 
 def _parse_until_years_list(until_years, label):
@@ -498,7 +543,7 @@ def _parse_axis_list(entries, valid_members, reserved_names, label):
 
 
 def _parse_ratio_groups(entries, valid_members, reserved_names, label):
-    """Parse one node_capacity_ratio.ratio_groups config list.
+    """Parse one node_capacity_ratio/node_output_ratio ratio_groups list.
 
     Each entry is a single-key dict ``{group_name: {"numerator": [...],
     "denominator": [...]}}``. Unlike `_parse_axis_list`, membership is NOT
@@ -564,8 +609,9 @@ def axis_physical_unit(axis, units, ureg):
     cost_capex_yearly's unit at the member nodes, additionally masked to the
     member technologies when set; node carbon-emissions-cumulative axes
     annualise the instantaneous carbon_emissions_technology unit (x hour),
-    same mechanism as carrier axes; node capacity-ratio axes are a ratio of
-    two capacity sums and so report "dimensionless"; the cost axis reads
+    same mechanism as carrier axes; node capacity-ratio and output-ratio
+    axes are a ratio of two capacity/output sums and so report
+    "dimensionless"; the cost axis reads
     COST_VARIABLE's unit. Heterogeneous lumps yield a ' + '-joined string.
     `units` is the model's variable-unit mapping, which is empty when unit
     tracking is switched off.
@@ -582,7 +628,7 @@ def axis_physical_unit(axis, units, ureg):
         found = sorted({str(u) for u in np.atleast_1d(np.asarray(series))})
         return " + ".join(found) if found else None
 
-    if axis.kind == NODE_CAPACITY_RATIO:
+    if axis.kind in (NODE_CAPACITY_RATIO, NODE_OUTPUT_RATIO):
         return "dimensionless"
 
     if axis.kind == TECH_CAPACITY:
