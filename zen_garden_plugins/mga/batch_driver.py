@@ -51,7 +51,10 @@ def run_batch_mode(mga, cfg):
     """
     from pyoNearOpt.exploration_methods.batch_ORACLE import batch_oracle
 
-    tolerance_prob = float(cfg["tolerance_prob"])  # required, deliberately no default
+    # Required, deliberately no default (the schema's None means unset).
+    if cfg.get("tolerance_prob") is None:
+        raise ValueError("MGA batch: plugins.mga.batch.tolerance_prob must be set.")
+    tolerance_prob = float(cfg["tolerance_prob"])
     max_iterations = int(cfg.get("max_iterations", 200))
     tolerance_explore = float(cfg.get("tolerance_explore", 0.1))
     n_samples = int(cfg.get("n_samples", 1000))
@@ -66,7 +69,8 @@ def run_batch_mode(mga, cfg):
     bbo_enabled = bool(cfg.get("bbo_enabled", True))
     max_function_evaluations = int(cfg.get("max_function_evaluations", 2000))
     n_restarts = int(cfg.get("n_restarts", 1))
-    n_workers = int(cfg.get("n_workers", os.cpu_count() or 1))
+    # None (the schema default) means one worker per CPU.
+    n_workers = int(cfg.get("n_workers") or os.cpu_count() or 1)
     track_implied_threshold = bool(cfg.get("track_implied_threshold", False))
 
     poly, point_origin, supplied = _setup_bounds_and_approximation(mga, "batch", initial_bounds)
@@ -80,7 +84,7 @@ def run_batch_mode(mga, cfg):
 
     # Sibling of the per-query iter<batch>_<job> Postprocess folders.
     out = (
-        Path(mga.optimization_setup.analysis.folder_output)
+        Path(mga.optimization_step.config.analysis.folder_output)
         / f"{mga.postprocess_ctx['model_name']}_batch_summary"
         / mga.postprocess_ctx["subfolder"]
     )

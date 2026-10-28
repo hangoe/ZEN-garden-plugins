@@ -153,7 +153,10 @@ def _run_supf_mode(mga, cfg, mode, exploration):
     from pyoNearOpt.exploration_methods.supf_explore import supf_explore
     from pyoNearOpt.metrics import ci_convergence_metric
 
-    tolerance_prob = float(cfg["tolerance_prob"])  # required, deliberately no default
+    # Required, deliberately no default (the schema's None means unset).
+    if cfg.get("tolerance_prob") is None:
+        raise ValueError(f"MGA {mode}: plugins.mga.{mode}.tolerance_prob must be set.")
+    tolerance_prob = float(cfg["tolerance_prob"])
     max_iterations = int(cfg.get("max_iterations", 200))
     tolerance_explore = float(cfg.get("tolerance_explore", 0.1))
     n_samples = int(cfg.get("n_samples", 1000))
@@ -197,7 +200,7 @@ def _run_supf_mode(mga, cfg, mode, exploration):
     # The summary folder is a sibling of the per-iteration Postprocess
     # folders; the subfolder separates scenarios (empty for plain runs).
     out = (
-        Path(mga.optimization_setup.analysis.folder_output)
+        Path(mga.optimization_step.config.analysis.folder_output)
         / f"{mga.postprocess_ctx['model_name']}_{mode}_summary"
         / mga.postprocess_ctx["subfolder"]
     )

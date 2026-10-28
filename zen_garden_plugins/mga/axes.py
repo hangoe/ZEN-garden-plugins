@@ -62,7 +62,7 @@ class Axis:
     ratio of the two would be a genuine nonlinear term and could not serve
     as an LP objective/projection/support-function term the way every other
     axis does. `period` is reused here as `(year, year)` to select the one
-    relevant `set_time_steps_yearly` index via the existing
+    relevant `set_years` index via the existing
     `_year_indices_in_period` helper, rather than adding a separate
     single-year field.
     capacity_type is the "+"-joined selected type(s) for tech
@@ -570,10 +570,10 @@ def axis_physical_unit(axis, units, ureg):
     `units` is the model's variable-unit mapping, which is empty when unit
     tracking is switched off.
 
-    The unit series are indexed by ZEN-garden's documentation names for the
-    dimensions ("technology", "capacity_type", "carrier", "location"), which
-    differ from the set names the variables themselves are indexed by
-    ("set_technologies" and so on).
+    Since ZEN-garden v3 the unit series are indexed by the same set names as
+    the variables themselves ("set_technologies", "set_capacity_types",
+    "set_carriers", "set_location"); v2 used documentation names
+    ("technology", ...) instead.
     """
     if axis.kind == TOTAL_COST:
         series = units.get(COST_VARIABLE)
@@ -589,9 +589,9 @@ def axis_physical_unit(axis, units, ureg):
         series = units.get("capacity_addition")
         if series is None:
             return None
-        mask = series.index.get_level_values("technology").isin(
+        mask = series.index.get_level_values("set_technologies").isin(
             axis.members
-        ) & series.index.get_level_values("capacity_type").isin(
+        ) & series.index.get_level_values("set_capacity_types").isin(
             axis.capacity_type.split("+")
         )
         found = sorted({str(u) for u in series[mask].to_numpy()})
@@ -606,9 +606,9 @@ def axis_physical_unit(axis, units, ureg):
         series = units.get("cost_capex_yearly")
         if series is None:
             return None
-        mask = series.index.get_level_values("location").isin(axis.members)
+        mask = series.index.get_level_values("set_location").isin(axis.members)
         if axis.technologies is not None:
-            mask &= series.index.get_level_values("technology").isin(axis.technologies)
+            mask &= series.index.get_level_values("set_technologies").isin(axis.technologies)
         found = sorted({str(u) for u in series[mask].to_numpy()})
         return " + ".join(found) if found else None
 
@@ -616,7 +616,7 @@ def axis_physical_unit(axis, units, ureg):
         series = units.get("carbon_emissions_technology")
         if series is None:
             return None
-        mask = series.index.get_level_values("location").isin(axis.members)
+        mask = series.index.get_level_values("set_location").isin(axis.members)
         return _annualised_unit(series, mask, ureg)
 
     # CARRIER_IMPORT: flow_import is an instantaneous rate, while the axis is
@@ -624,7 +624,7 @@ def axis_physical_unit(axis, units, ureg):
     series = units.get("flow_import")
     if series is None:
         return None
-    mask = series.index.get_level_values("carrier").isin(axis.members)
+    mask = series.index.get_level_values("set_carriers").isin(axis.members)
     return _annualised_unit(series, mask, ureg)
 
 

@@ -59,8 +59,10 @@ and writer).
 Requirements
 ------------
 
-* A ZEN-garden that provides the ``after_solve`` event (not yet in a
-  released version).
+* ZEN-garden v3 (3.1.1 or later) with the ``after_solve`` event, which is
+  not yet in a released version (use the ``feature/mga`` branch). The event
+  fires at the end of ``OptimizationStep.write_results`` and hands the
+  plugin the solved ``OptimizationStep`` as ``optimization_step``.
 * Oracle, sampling, bbo and batch modes all need **pyoNearOpt** (E. Turan,
   ETH Zurich) -- not public yet; request access and install it manually,
   e.g. ``pip install -e path/to/pyoNearOpt``. Weights mode works without
@@ -94,7 +96,11 @@ Configuration
 -------------
 
 Activate the plugin by adding an ``mga`` entry to the ``plugins`` block of
-your ``config.json``. Unknown keys anywhere in the block are rejected.
+your ``config.yaml``. ZEN-garden v3 validates the block against the plugin's
+pydantic ``Config`` schema (``config_schema.py``) when it loads the plugin:
+unknown keys anywhere in the block are rejected, and values must have the
+documented type (strict validation, e.g. ``"0.1"`` is not a float). All
+defaults below are filled in at load time.
 
 ``epsilon`` (float, default 0.1)
     Near-optimality slack, e.g. 0.1 for a 10 % cost budget.
@@ -401,227 +407,184 @@ your ``config.json``. Unknown keys anywhere in the block are rejected.
 
 Example (weights mode):
 
-.. code-block:: json
+.. code-block:: yaml
 
-    {
-        "plugins": {
-            "mga": {
-                "mode": "weights",
-                "epsilon": 0.1,
-                "axes": {
-                    "technologies": [
-                        "nuclear",
-                        {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
-                    ],
-                    "node_capex_cumulative": {
-                        "nodes": ["DE", "CH"],
-                        "until_years": [2030, 2040, 2050]
-                    }
-                },
-                "iterations": [
-                    {"weights": {"nuclear": 1.0}},
-                    {"weights": {"hydro_lump": 1.0, "DE_until_2030": 0.5}}
-                ]
-            }
-        }
-    }
+    plugins:
+      mga:
+        mode: weights
+        epsilon: 0.1
+        axes:
+          technologies:
+          - nuclear
+          - hydro_lump: [reservoir_hydro, run-of-river_hydro]
+          node_capex_cumulative:
+            nodes: [DE, CH]
+            until_years: [2030, 2040, 2050]
+        iterations:
+        - weights:
+            nuclear: 1.0
+        - weights:
+            hydro_lump: 1.0
+            DE_until_2030: 0.5
 
 Example (oracle mode):
 
-.. code-block:: json
+.. code-block:: yaml
 
-    {
-        "plugins": {
-            "mga": {
-                "mode": "oracle",
-                "epsilon": 0.1,
-                "axes": {
-                    "technologies": [
-                        "nuclear",
-                        {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
-                    ],
-                    "carrier_imports": ["biomass"],
-                    "node_capex": ["DE", "CH", {"benelux": ["BE", "NL", "LU"]}],
-                    "node_capex_cumulative": {
-                        "nodes": ["DE", "CH"],
-                        "until_years": [2030, 2040, 2050]
-                    },
-                    "node_capex_by_technology": {
-                        "nodes": ["DE", "CH"],
-                        "technology_groups": [
-                            {"renewables": ["pv", "wind", "hydro"]}
-                        ]
-                    },
-                    "node_capex_cumulative_tech": {
-                        "nodes": ["DE", "CH"],
-                        "until_years": [2030, 2040, 2050],
-                        "technology_groups": [
-                            {"renewables": ["pv", "wind", "hydro"]},
-                            "nuclear"
-                        ]
-                    },
-                    "include_cost": true
-                },
-                "oracle": {
-                    "tolerance": 0.1,
-                    "max_min": {"solver_options": {"TimeLimit": 120}}
-                }
-            }
-        }
-    }
+    plugins:
+      mga:
+        mode: oracle
+        epsilon: 0.1
+        axes:
+          technologies:
+          - nuclear
+          - hydro_lump: [reservoir_hydro, run-of-river_hydro]
+          carrier_imports: [biomass]
+          node_capex:
+          - DE
+          - CH
+          - benelux: [BE, NL, LU]
+          node_capex_cumulative:
+            nodes: [DE, CH]
+            until_years: [2030, 2040, 2050]
+          node_capex_by_technology:
+            nodes: [DE, CH]
+            technology_groups:
+            - renewables: [pv, wind, hydro]
+          node_capex_cumulative_tech:
+            nodes: [DE, CH]
+            until_years: [2030, 2040, 2050]
+            technology_groups:
+            - renewables: [pv, wind, hydro]
+            - nuclear
+          include_cost: true
+        oracle:
+          tolerance: 0.1
+          max_min:
+            solver_options:
+              TimeLimit: 120
 
 Example (bbo mode, ``"per_axes"`` normalisation):
 
-.. code-block:: json
+.. code-block:: yaml
 
-    {
-        "plugins": {
-            "mga": {
-                "mode": "bbo",
-                "epsilon": 0.1,
-                "normalisation": "per_axes",
-                "per_axes_capex_reference": 15e12,
-                "axes": {
-                    "node_capex_cumulative": {
-                        "nodes": ["north", "west", "south", "east"],
-                        "until_years": [2030, 2040, 2050]
-                    },
-                    "node_capacity_ratio": {
-                        "nodes": ["north", "west", "south", "east"],
-                        "years": [2030, 2040, 2050],
-                        "ratio_groups": [
-                            {"road_electrification": {
-                                "numerator": ["BEV", "HDT-BEV"],
-                                "denominator": ["BEV", "HDT-BEV", "ICE_car", "ICE_truck"]
-                            }},
-                            {"heating_electrification": {
-                                "numerator": ["e_boiler", "heat_pump"],
-                                "denominator": ["e_boiler", "heat_pump", "gas_boiler", "oil_boiler"]
-                            }}
-                        ]
-                    },
-                    "node_carbon_emissions_cumulative": {
-                        "nodes": ["north", "west", "south", "east"],
-                        "until_years": [2030, 2040, 2050]
-                    },
-                    "include_cost": true
-                },
-                "bbo": {"tolerance_prob": 0.9}
-            }
-        }
-    }
+    plugins:
+      mga:
+        mode: bbo
+        epsilon: 0.1
+        normalisation: per_axes
+        per_axes_capex_reference: 15000000000000.0
+        axes:
+          node_capex_cumulative:
+            nodes: [north, west, south, east]
+            until_years: [2030, 2040, 2050]
+          node_capacity_ratio:
+            nodes: [north, west, south, east]
+            years: [2030, 2040, 2050]
+            ratio_groups:
+            - road_electrification:
+                numerator: [BEV, HDT-BEV]
+                denominator: [BEV, HDT-BEV, ICE_car, ICE_truck]
+            - heating_electrification:
+                numerator: [e_boiler, heat_pump]
+                denominator: [e_boiler, heat_pump, gas_boiler, oil_boiler]
+          node_carbon_emissions_cumulative:
+            nodes: [north, west, south, east]
+            until_years: [2030, 2040, 2050]
+          include_cost: true
+        bbo:
+          tolerance_prob: 0.9
 
 Example (sampling mode):
 
-.. code-block:: json
+.. code-block:: yaml
 
-    {
-        "plugins": {
-            "mga": {
-                "mode": "sampling",
-                "epsilon": 0.1,
-                "axes": {
-                    "technologies": [
-                        "nuclear",
-                        {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
-                    ],
-                    "carrier_imports": ["biomass"],
-                    "node_capex": ["DE", "CH", {"benelux": ["BE", "NL", "LU"]}],
-                    "node_capex_cumulative": {
-                        "nodes": ["DE", "CH"],
-                        "until_years": [2030, 2040, 2050]
-                    },
-                    "node_capex_by_technology": {
-                        "nodes": ["DE", "CH"],
-                        "technology_groups": [
-                            {"renewables": ["pv", "wind", "hydro"]}
-                        ]
-                    },
-                    "include_cost": true
-                },
-                "sampling": {
-                    "tolerance_prob": 0.9,
-                    "max_iterations": 200
-                }
-            }
-        }
-    }
+    plugins:
+      mga:
+        mode: sampling
+        epsilon: 0.1
+        axes:
+          technologies:
+          - nuclear
+          - hydro_lump: [reservoir_hydro, run-of-river_hydro]
+          carrier_imports: [biomass]
+          node_capex:
+          - DE
+          - CH
+          - benelux: [BE, NL, LU]
+          node_capex_cumulative:
+            nodes: [DE, CH]
+            until_years: [2030, 2040, 2050]
+          node_capex_by_technology:
+            nodes: [DE, CH]
+            technology_groups:
+            - renewables: [pv, wind, hydro]
+          include_cost: true
+        sampling:
+          tolerance_prob: 0.9
+          max_iterations: 200
 
 Example (bbo mode):
 
-.. code-block:: json
+.. code-block:: yaml
 
-    {
-        "plugins": {
-            "mga": {
-                "mode": "bbo",
-                "epsilon": 0.1,
-                "axes": {
-                    "technologies": [
-                        "nuclear",
-                        {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
-                    ],
-                    "carrier_imports": ["biomass"],
-                    "node_capex": ["DE", "CH", {"benelux": ["BE", "NL", "LU"]}],
-                    "node_capex_cumulative": {
-                        "nodes": ["DE", "CH"],
-                        "until_years": [2030, 2040, 2050]
-                    },
-                    "node_capex_by_technology": {
-                        "nodes": ["DE", "CH"],
-                        "technology_groups": [
-                            {"renewables": ["pv", "wind", "hydro"]}
-                        ]
-                    },
-                    "include_cost": true
-                },
-                "bbo": {
-                    "tolerance_prob": 0.9,
-                    "max_iterations": 200,
-                    "max_function_evaluations": 2000
-                }
-            }
-        }
-    }
+    plugins:
+      mga:
+        mode: bbo
+        epsilon: 0.1
+        axes:
+          technologies:
+          - nuclear
+          - hydro_lump: [reservoir_hydro, run-of-river_hydro]
+          carrier_imports: [biomass]
+          node_capex:
+          - DE
+          - CH
+          - benelux: [BE, NL, LU]
+          node_capex_cumulative:
+            nodes: [DE, CH]
+            until_years: [2030, 2040, 2050]
+          node_capex_by_technology:
+            nodes: [DE, CH]
+            technology_groups:
+            - renewables: [pv, wind, hydro]
+          include_cost: true
+        bbo:
+          tolerance_prob: 0.9
+          max_iterations: 200
+          max_function_evaluations: 2000
 
 Example (batch mode):
 
-.. code-block:: json
+.. code-block:: yaml
 
-    {
-        "plugins": {
-            "mga": {
-                "mode": "batch",
-                "epsilon": 0.1,
-                "axes": {
-                    "technologies": [
-                        "nuclear",
-                        {"hydro_lump": ["reservoir_hydro", "run-of-river_hydro"]}
-                    ],
-                    "carrier_imports": ["biomass"],
-                    "node_capex": ["DE", "CH", {"benelux": ["BE", "NL", "LU"]}],
-                    "node_capex_cumulative": {
-                        "nodes": ["DE", "CH"],
-                        "until_years": [2030, 2040, 2050]
-                    },
-                    "node_capex_by_technology": {
-                        "nodes": ["DE", "CH"],
-                        "technology_groups": [
-                            {"renewables": ["pv", "wind", "hydro"]}
-                        ]
-                    },
-                    "include_cost": true
-                },
-                "batch": {
-                    "tolerance_prob": 0.9,
-                    "max_iterations": 200,
-                    "batch_size": 8,
-                    "strategy_mode": "sampling",
-                    "n_workers": 8
-                }
-            }
-        }
-    }
+    plugins:
+      mga:
+        mode: batch
+        epsilon: 0.1
+        axes:
+          technologies:
+          - nuclear
+          - hydro_lump: [reservoir_hydro, run-of-river_hydro]
+          carrier_imports: [biomass]
+          node_capex:
+          - DE
+          - CH
+          - benelux: [BE, NL, LU]
+          node_capex_cumulative:
+            nodes: [DE, CH]
+            until_years: [2030, 2040, 2050]
+          node_capex_by_technology:
+            nodes: [DE, CH]
+            technology_groups:
+            - renewables: [pv, wind, hydro]
+          include_cost: true
+        batch:
+          tolerance_prob: 0.9
+          max_iterations: 200
+          batch_size: 8
+          strategy_mode: sampling
+          n_workers: 8
 
 Outputs
 -------

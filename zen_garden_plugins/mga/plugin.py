@@ -29,8 +29,8 @@ under one of two modes:
   optional "bbo" extra (pypop7), even with strategy_mode="sampling".
   Driver in batch_driver.py, worker pool in parallel_solve.py.
 
-Rolling-horizon runs are rejected: after_solve fires after the horizon loop,
-so the plugin would only see the final step's model. Scaled runs
+Rolling-horizon runs are rejected: after_solve fires once per horizon step,
+so MGA would explore each step's myopic model separately. Scaled runs
 (solver.use_scaling) and non-cost objectives are rejected too: MGA's added
 expressions assume an unscaled model and a total-cost C*.
 
@@ -96,9 +96,10 @@ Glossary
 Every solve is written to disk as a sibling sub-solution of the baseline via
 Postprocess.
 
-Configured via the "plugins.mga" block in config.json; unknown keys are
-rejected. Full config reference: the plugin's docs page in
-docs/files/available_plugins/mga.
+Configured via the "plugins.mga" block in config.yaml, validated by the
+pydantic `Config` schema (config_schema.py) that ZEN-garden v3's plugin
+loader requires; unknown keys are rejected. Full config reference: the
+plugin's docs page in docs/files/available_plugins/mga.
 
 pyoNearOpt compatibility is documented in oracle_driver.py.
 """
@@ -109,11 +110,13 @@ import time
 
 import numpy as np
 import xarray as xr
+from zen_garden.model.component_types.constraint import GenericConstraint
 from zen_garden.plugin_system.events import Event, EventPublisher
 from zen_garden.postprocess.postprocess import Postprocess
 
 from .axes import COST_VARIABLE, Axis, axis_physical_unit, build_axis_groups
 from .batch_driver import run_batch_mode
+from .config_schema import Config, validate_config  # noqa: F401 (loader API)
 from .oracle_driver import run_oracle_mode
 from .polytope_io import (
     CARRIER_IMPORT,
@@ -127,115 +130,6 @@ from .polytope_io import (
     TOTAL_COST,
 )
 from .supf_driver import run_bbo_mode, run_sampling_mode
-
-# Module-level config, updated by the plugin loader with the user's
-# "plugins.mga" block. The merge is a SHALLOW dict.update: nested dicts like
-# "axes" and "oracle" are replaced wholesale, so their defaults must be
-# applied at access time via .get(), never stored here.
-config = {
-    "epsilon": 0.1,
-    "mode": "weights",
-    "normalisation": "relative",
-    "per_axes_capex_reference": 15e12,
-    "iterations": [],
-    "axes": {},
-    "oracle": {},
-    "sampling": {},
-    "bbo": {},
-    "batch": {},
-}
-
-# Recognised config keys per block; anything else is rejected rather than
-# silently ignored.
-_KNOWN_KEYS = {
-    "plugins.mga": {
-        "epsilon",
-        "mode",
-        "normalisation",
-        "per_axes_capex_reference",
-        "iterations",
-        "axes",
-        "oracle",
-        "sampling",
-        "bbo",
-        "batch",
-    },
-    "plugins.mga.axes": {
-        "technologies",
-        "carrier_imports",
-        "include_cost",
-        "node_capex",
-        "node_capex_cumulative",
-        "node_capex_by_technology",
-        "node_capex_cumulative_tech",
-        "node_capacity_ratio",
-        "node_carbon_emissions_cumulative",
-    },
-    "plugins.mga.axes.node_capex_cumulative": {"nodes", "until_years"},
-    "plugins.mga.axes.node_capex_by_technology": {"nodes", "technology_groups"},
-    "plugins.mga.axes.node_capex_cumulative_tech": {
-        "nodes",
-        "until_years",
-        "technology_groups",
-    },
-    "plugins.mga.axes.node_capacity_ratio": {"nodes", "years", "ratio_groups"},
-    "plugins.mga.axes.node_carbon_emissions_cumulative": {"nodes", "until_years"},
-    "plugins.mga.oracle": {"tolerance", "max_iterations", "initial_bounds", "max_min"},
-    "plugins.mga.oracle.max_min": {
-        "formulation",
-        "use_bigM",
-        "big_M",
-        "t_max",
-        "solver_options",
-        "certificate_time_limit",
-    },
-    "plugins.mga.sampling": {
-        "tolerance_prob",
-        "max_iterations",
-        "tolerance_explore",
-        "n_samples",
-        "alpha",
-        "method",
-        "initial_bounds",
-        "use_bounding_box",
-        "seed_rng",
-        "track_implied_threshold",
-    },
-    "plugins.mga.bbo": {
-        "tolerance_prob",
-        "max_iterations",
-        "tolerance_explore",
-        "n_samples",
-        "alpha",
-        "method",
-        "initial_bounds",
-        "use_bounding_box",
-        "seed_rng",
-        "max_function_evaluations",
-        "n_restarts",
-        "optimizer_options",
-        "track_implied_threshold",
-    },
-    "plugins.mga.batch": {
-        "tolerance_prob",
-        "max_iterations",
-        "tolerance_explore",
-        "n_samples",
-        "alpha",
-        "method",
-        "initial_bounds",
-        "use_bounding_box",
-        "seed_rng",
-        "batch_size",
-        "strategy_mode",
-        "convergence_mode",
-        "max_function_evaluations",
-        "n_restarts",
-        "bbo_enabled",
-        "n_workers",
-        "track_implied_threshold",
-    },
-}
 
 # A cut returned by find_nearest_point must keep every known near-optimal
 # point inside the outer approximation; inexact projection duals (e.g.
@@ -259,14 +153,14 @@ def _scalar_da(value):
 
 
 def _year_indices_in_period(period, year_indices, real_years):
-    """`set_time_steps_yearly` indices whose calendar year falls in `period`.
+    """`set_years` indices whose calendar year falls in `period`.
 
     `period` is (start_year, end_year), inclusive on both ends; start may be
     None, meaning no lower bound (every model year up to and including end).
     `year_indices` and `real_years` are parallel sequences (year_indices[i]'s
-    calendar year is real_years[i]), as read off cost_capex_yearly's
-    set_time_steps_yearly coordinate and energy_system.set_time_steps_years
-    respectively. Returns an empty list if the period covers no model year.
+    calendar year is real_years[i]), as read off model_schema.set_years and
+    model_schema.set_time_steps_years respectively. Returns an empty list if
+    the period covers no model year.
     """
     start, end = period
     return [
@@ -280,7 +174,7 @@ def _year_interval_expansion_factors(
     year_indices, discount_rate: float, interval_between_years: int, last_year_index: int
 ) -> "xr.DataArray":
     """Per-sampled-year discount/interval-expansion factor, indexed by
-    set_time_steps_yearly.
+    set_years.
 
     With discount_rate > 0, reproduces ZEN-garden's own
     constraint_net_present_cost formula (energy_system.py) exactly -- so a
@@ -308,7 +202,7 @@ def _year_interval_expansion_factors(
             for i in range(n)
         ))
     return xr.DataArray(
-        factors, dims=["set_time_steps_yearly"], coords={"set_time_steps_yearly": year_indices}
+        factors, dims=["set_years"], coords={"set_years": year_indices}
     )
 
 
@@ -344,105 +238,6 @@ def normalise_rows(A, b):
     return A / norms[:, None], b / norms
 
 
-def validate_config(cfg) -> None:
-    """Reject unknown keys and invalid values in the plugin config.
-
-    Every setting is read with a default, so an unrecognised key would
-    otherwise be ignored in silence and the run would proceed on defaults.
-    """
-    for label, block in (
-        ("plugins.mga", cfg),
-        ("plugins.mga.axes", cfg.get("axes", {})),
-        (
-            "plugins.mga.axes.node_capex_cumulative",
-            cfg.get("axes", {}).get("node_capex_cumulative", {}),
-        ),
-        (
-            "plugins.mga.axes.node_capex_by_technology",
-            cfg.get("axes", {}).get("node_capex_by_technology", {}),
-        ),
-        (
-            "plugins.mga.axes.node_capex_cumulative_tech",
-            cfg.get("axes", {}).get("node_capex_cumulative_tech", {}),
-        ),
-        (
-            "plugins.mga.axes.node_capacity_ratio",
-            cfg.get("axes", {}).get("node_capacity_ratio", {}),
-        ),
-        (
-            "plugins.mga.axes.node_carbon_emissions_cumulative",
-            cfg.get("axes", {}).get("node_carbon_emissions_cumulative", {}),
-        ),
-        ("plugins.mga.oracle", cfg.get("oracle", {})),
-        ("plugins.mga.oracle.max_min", cfg.get("oracle", {}).get("max_min", {})),
-        ("plugins.mga.sampling", cfg.get("sampling", {})),
-        ("plugins.mga.bbo", cfg.get("bbo", {})),
-        ("plugins.mga.batch", cfg.get("batch", {})),
-    ):
-        unknown = sorted(set(block) - _KNOWN_KEYS[label])
-        if unknown:
-            raise ValueError(
-                f"Unknown MGA config key(s) in {label}: {unknown}. "
-                f"Known keys: {sorted(_KNOWN_KEYS[label])}."
-            )
-
-    normalisation = cfg.get("normalisation", "relative")
-    if normalisation not in ("relative", "minmax", "units", "share", "per_axes"):
-        raise ValueError(
-            f"Unknown MGA normalisation: {normalisation!r}. Expected "
-            f"'relative', 'minmax', 'units', 'share' or 'per_axes'."
-        )
-    axes_cfg = cfg.get("axes", {})
-    if normalisation == "share" and (
-        axes_cfg.get("technologies") or axes_cfg.get("carrier_imports")
-    ):
-        raise ValueError(
-            "MGA: normalisation='share' only supports capex axes "
-            "(node_capex / node_capex_cumulative / node_capex_by_technology / "
-            "node_capex_cumulative_tech); remove axes.technologies/"
-            "axes.carrier_imports or use a different normalisation."
-        )
-    if normalisation == "per_axes" and (
-        axes_cfg.get("technologies")
-        or axes_cfg.get("carrier_imports")
-        or axes_cfg.get("node_capex")
-        or axes_cfg.get("node_capex_by_technology")
-        or axes_cfg.get("node_capex_cumulative_tech")
-    ):
-        raise ValueError(
-            "MGA: normalisation='per_axes' only supports node_capex_cumulative, "
-            "node_capacity_ratio and node_carbon_emissions_cumulative axes (plus "
-            "the cost axis); remove axes.technologies/axes.carrier_imports/"
-            "axes.node_capex/axes.node_capex_by_technology/"
-            "axes.node_capex_cumulative_tech or use a different normalisation."
-        )
-    if cfg.get("mode") == "oracle" and normalisation in (
-        "units",
-        "minmax",
-        "share",
-        "per_axes",
-    ):
-        raise ValueError(
-            f"MGA: normalisation={normalisation!r} is not supported in "
-            "oracle mode -- oracle's max-min MILP relies on big_M/t_max "
-            "dominating axis magnitudes and a cut-validity guard sized for "
-            "O(1) normalised coordinates anchored at offset=0, both of "
-            "which assume 'relative' normalisation. Use sampling or bbo "
-            "mode for 'units'/'minmax'/'share'/'per_axes'."
-        )
-    per_axes_capex_reference = cfg.get("per_axes_capex_reference", 15e12)
-    if (
-        isinstance(per_axes_capex_reference, bool)
-        or not isinstance(per_axes_capex_reference, (int, float))
-        or not np.isfinite(per_axes_capex_reference)
-        or per_axes_capex_reference <= 0
-    ):
-        raise ValueError(
-            "MGA: per_axes_capex_reference must be a positive finite number, "
-            f"got {per_axes_capex_reference!r}."
-        )
-
-
 class MGA:
     """Near-optimal exploration on a solved ZEN-garden model.
 
@@ -455,17 +250,17 @@ class MGA:
     """
 
     # Dims aggregated away per axis kind, besides the member dim itself.
-    _TECH_AGG = ["set_capacity_types", "set_location", "set_time_steps_yearly"]
+    _TECH_AGG = ["set_capacity_types", "set_location", "set_years"]
     _CARRIER_AGG = ["set_nodes", "set_time_steps_operation"]
     _NODE_AGG_CAPEX = [
         "set_technologies",
         "set_capacity_types",
-        "set_time_steps_yearly",
+        "set_years",
     ]
 
     def __init__(
         self,
-        optimization_setup,
+        optimization_step,
         epsilon,
         postprocess_ctx,
         technologies=None,
@@ -482,8 +277,8 @@ class MGA:
     ):
         """
         Args:
-            optimization_setup: OptimizationSetup holding the solved baseline
-                (model.objective.value is C*).
+            optimization_step: ZEN-garden OptimizationStep holding the solved
+                baseline (optimization_model.lp_model.objective.value is C*).
             epsilon: Near-optimality slack, e.g. 0.1 for a 10% cost budget.
             postprocess_ctx: Dict of Postprocess arguments for the iteration
                 outputs (scenarios, subfolder, model_name, scenario_name,
@@ -570,8 +365,14 @@ class MGA:
         """
         if epsilon <= 0:
             raise ValueError(f"MGA epsilon must be positive, got {epsilon!r}")
-        self.optimization_setup = optimization_setup
-        self.model = optimization_setup.model
+        self.optimization_step = optimization_step
+        # ZEN-garden's OptimizationModel (registries of variables, parameters,
+        # expressions) and the linopy model it wraps.
+        self.optimization_model = optimization_step.optimization_model
+        self.model = self.optimization_model.lp_model
+        model_schema = optimization_step.model_schema
+        system = optimization_step.config.system
+        parameters = self.optimization_model.parameters
         self.epsilon = epsilon
         self.postprocess_ctx = postprocess_ctx
         # Baseline objective C*, captured before MGA touches the model.
@@ -590,7 +391,7 @@ class MGA:
             )
         else:
             all_carriers = []
-        self.all_nodes = list(optimization_setup.energy_system.set_nodes)
+        self.all_nodes = list(system.set_nodes)
         (
             tech_groups,
             carrier_groups,
@@ -727,7 +528,7 @@ class MGA:
         if any(axis.kind == CARRIER_IMPORT for axis in self.axes):
             self.flow_import = self.model.variables["flow_import"]
             self._ts_duration = (
-                optimization_setup.parameters.time_steps_operation_duration
+                parameters.time_steps_operation_duration
             )
         else:
             self.flow_import = None
@@ -770,7 +571,7 @@ class MGA:
                 "carbon_emissions_technology"
             ]
             year_op_duration = (
-                optimization_setup.energy_system.rules.get_year_time_step_duration_array()
+                GenericConstraint.get_year_time_step_duration_array(optimization_step)
             )
             self.carbon_emissions_technology_yearly = (
                 carbon_emissions_technology * year_op_duration
@@ -792,12 +593,10 @@ class MGA:
         )
         self._axis_year_indices: dict[str, list] = {}
         if any(axis.kind in _period_kinds for axis in self.axes):
-            year_indices = list(optimization_setup.energy_system.set_time_steps_yearly)
-            real_years = list(optimization_setup.energy_system.set_time_steps_years)
-            last_year_index = int(
-                optimization_setup.energy_system.set_time_steps_yearly_entire_horizon[-1]
-            )
-            interval_between_years = int(optimization_setup.system.interval_between_years)
+            year_indices = list(model_schema.set_years)
+            real_years = list(model_schema.set_time_steps_years)
+            last_year_index = int(model_schema.set_years_entire_horizon[-1])
+            interval_between_years = int(system.interval_between_years)
             for axis in self.axes:
                 if axis.kind not in _period_kinds:
                     continue
@@ -825,7 +624,7 @@ class MGA:
         self._capex_discount_factor = (
             _year_interval_expansion_factors(
                 year_indices,
-                float(optimization_setup.parameters.discount_rate),
+                float(parameters.discount_rate),
                 interval_between_years,
                 last_year_index,
             )
@@ -940,7 +739,7 @@ class MGA:
                 elif axis.kind == NODE_CAPACITY_RATIO:
                     ref = 1.0
                 elif axis.kind == NODE_CARBON_EMISSIONS_CUMULATIVE:
-                    ref = float(optimization_setup.parameters.carbon_emissions_budget)
+                    ref = float(parameters.carbon_emissions_budget)
                 else:
                     continue
                 self._per_axes_reference[axis.name] = ref
@@ -983,9 +782,7 @@ class MGA:
         other dimension -- so the projection equality built from this
         expression and the value read in axis_value are the same quantity.
         """
-        return self.optimization_setup.energy_system.rules.objective_total_cost(
-            self.model
-        )
+        return self.optimization_model.expressions["total_cost"]
 
     # ------------------------------------------------------------------
     # weights mode
@@ -1049,7 +846,7 @@ class MGA:
             if d not in ("set_technologies", type_dim)
         ]
         active = (self.capacity_addition.labels != -1).any(other_dims)
-        power_type = str(self.optimization_setup.system.set_capacity_types[0])
+        power_type = str(self.optimization_step.config.system.set_capacity_types[0])
         known_types = [str(c) for c in self.capacity_addition.coords[type_dim].values]
         if power_type not in known_types:
             raise RuntimeError(
@@ -1147,7 +944,7 @@ class MGA:
             .sel(
                 set_technologies=list(axis.denominator_technologies),
                 set_location=list(axis.members),
-                set_time_steps_yearly=year_ids,
+                set_years=year_ids,
             )
             .sum()
         )
@@ -1218,9 +1015,9 @@ class MGA:
                 .sel(
                     set_technologies=list(axis.technologies),
                     set_location=members,
-                    set_time_steps_yearly=year_ids,
+                    set_years=year_ids,
                 )
-                .sum(["set_technologies", "set_capacity_types", "set_location", "set_time_steps_yearly"])
+                .sum(["set_technologies", "set_capacity_types", "set_location", "set_years"])
             )
             return numerator / self._ratio_denominator_baseline[axis.name]
         if axis.kind == NODE_CARBON_EMISSIONS_CUMULATIVE:
@@ -1229,9 +1026,9 @@ class MGA:
             # mechanism as the node-capex kinds below).
             term = emissions.sel(set_location=members)
             year_ids = self._axis_year_indices[axis.name]
-            term = term.sel(set_time_steps_yearly=year_ids)
+            term = term.sel(set_years=year_ids)
             term = term * self._emissions_interval_factor
-            return term.sum(["set_technologies", "set_location", "set_time_steps_yearly"])
+            return term.sum(["set_technologies", "set_location", "set_years"])
         # NODE_CAPEX / NODE_CAPEX_CUMULATIVE / NODE_CAPEX_TECH /
         # NODE_CAPEX_CUMULATIVE_TECH: transport technologies have no valid
         # entry at a node-named location, so they drop out of this selection
@@ -1242,10 +1039,10 @@ class MGA:
             term = term.sel(set_technologies=list(axis.technologies))
         year_ids = self._axis_year_indices.get(axis.name)
         if year_ids is not None:
-            term = term.sel(set_time_steps_yearly=year_ids)
+            term = term.sel(set_years=year_ids)
         # Discount/interval-expand each sampled year's capex the same way
         # net_present_cost is (see __init__'s _capex_discount_factor); xarray
-        # aligns term's (possibly year-restricted) set_time_steps_yearly
+        # aligns term's (possibly year-restricted) set_years
         # coordinate against the factor automatically.
         term = term * self._capex_discount_factor
         return term.sum(self._NODE_AGG_CAPEX + ["set_location"])
@@ -1356,8 +1153,8 @@ class MGA:
         denominator technology group and the baseline value it was frozen
         at, regardless of normalisation mode, since that freezing is a
         property of the axis itself, not of "per_axes"."""
-        units = self.optimization_setup.variables.units
-        ureg = self.optimization_setup.energy_system.unit_handling.ureg
+        units = self.optimization_model.variables.units
+        ureg = self.optimization_step.unit_converter.ureg
         return {
             "axes": [
                 {
@@ -1551,8 +1348,8 @@ class MGA:
         self.scale = np.array(scale, dtype=float)
         self.offset = np.array(offset, dtype=float)
         if self.normalisation == "units":
-            units = self.optimization_setup.variables.units
-            ureg = self.optimization_setup.energy_system.unit_handling.ureg
+            units = self.optimization_model.variables.units
+            ureg = self.optimization_step.unit_converter.ureg
             seen = {axis_physical_unit(axis, units, ureg) for axis in self.design_axes}
             if len(seen) > 1:
                 logging.warning(
@@ -1612,8 +1409,8 @@ class MGA:
                 self.axis_expression(axis), sense=sense, overwrite=True
             )
             start = time.time()
-            self.optimization_setup.solve()
-            if not self.optimization_setup.optimality:
+            self.optimization_step.solve()
+            if not self.optimization_step.optimality:
                 raise RuntimeError(
                     f"MGA VMM {sense} LP for axis {axis.name!r} ended with "
                     f"{self.model.termination_condition!r}."
@@ -1710,19 +1507,24 @@ class MGA:
         """Write a Postprocess folder `<model_name>_<label>` for the
         currently loaded solution."""
         ctx = self.postprocess_ctx
+        step = self.optimization_step
         Postprocess(
-            self.optimization_setup,
+            step.model_schema,
+            step.unit_converter,
+            step.optimization_model,
+            step.scaling,
+            step.time_steps,
+            optimized_time_steps=step.optimized_time_steps,
             scenarios=ctx["scenarios"],
-            subfolder=ctx["subfolder"],
             model_name=f"{ctx['model_name']}_{label}",
-            scenario_name=ctx["scenario_name"],
+            subfolder=ctx["subfolder"],
             param_map=ctx["param_map"],
-        )
+        ).save_results(ctx["scenario_name"])
 
     def _solve_and_postprocess(self, label: str) -> None:
         """Solve the current model state and write its Postprocess folder."""
-        self.optimization_setup.solve()
-        if not self.optimization_setup.optimality:
+        self.optimization_step.solve()
+        if not self.optimization_step.optimality:
             raise RuntimeError(
                 f"MGA solve {label!r} failed: termination = "
                 f"{self.model.termination_condition}"
@@ -1757,6 +1559,16 @@ class MGA:
             name="mga_oracle_t",
             lower=0.0,
         )
+        # Postprocess saves every solution variable and looks each one up in
+        # ZEN-garden's variable registry, so variables added straight to the
+        # linopy model need a (unit-less) registry entry.
+        variables = self.optimization_model.variables
+        for name, doc in (
+            ("mga_oracle_delta", "MGA oracle: projection offset per axis"),
+            ("mga_oracle_t", "MGA oracle: normalised L-infinity distance"),
+        ):
+            variables.units[name] = None
+            variables.docs[name] = doc
 
         for i, axis in enumerate(self.axes):
             self.model.add_constraints(
@@ -1941,35 +1753,39 @@ class MGA:
 
 @EventPublisher.register(Event.after_solve)
 def run_mga(
-    *, optimization_setup, scenarios, subfolder, model_name, scenario_name, param_map
+    *, optimization_step, scenarios, subfolder, model_name, scenario_name, param_map
 ):
     """Run MGA after the baseline solve.
 
-    Returns the oracle summary directory (oracle mode) or None.
+    `optimization_step` is the solved ZEN-garden OptimizationStep; the other
+    arguments are what it passed to its own Postprocess, reused for every
+    MGA solve. Must not call `optimization_step.write_results()`, which
+    fires after_solve again. Returns the summary directory (oracle,
+    sampling, bbo, batch modes) or None.
     """
-    validate_config(config)
+    # The loader already validated the block and stored its model_dump();
+    # re-validating gives typed access and works for direct callers too.
+    config = validate_config(
+        optimization_step.config.plugins.get("mga", {})
+    ).model_dump()
     mode = config["mode"]
-    if mode not in ("weights", "oracle", "sampling", "bbo", "batch"):
-        raise ValueError(
-            f"Unknown MGA mode: {mode!r}. Expected 'weights', 'oracle', "
-            f"'sampling', 'bbo' or 'batch'."
-        )
-    if optimization_setup.system.use_rolling_horizon:
+    run_config = optimization_step.config
+    if run_config.system.use_rolling_horizon:
         raise ValueError(
             "MGA does not support rolling-horizon runs: after_solve fires "
-            "after the horizon loop, so MGA would explore only the final "
-            "step's model."
+            "once per horizon step, so MGA would explore each step's myopic "
+            "model separately."
         )
-    if optimization_setup.solver.use_scaling:
+    if run_config.solver.use_scaling:
         raise ValueError(
             "MGA does not support solver.use_scaling: re-scaling restores "
             "only the solution values, so MGA would add physical-unit "
             "expressions to a still-scaled model."
         )
-    if optimization_setup.analysis.objective != "total_cost":
+    if run_config.analysis.objective != "total_cost":
         raise ValueError(
             f"MGA defines near-optimality on the total cost, but the "
-            f"baseline objective is {optimization_setup.analysis.objective!r}."
+            f"baseline objective is {run_config.analysis.objective!r}."
         )
     if mode == "weights" and not config["iterations"]:
         logging.warning("MGA: weights mode without iterations; skipping.")
@@ -1978,7 +1794,7 @@ def run_mga(
 
     logging.info(f"MGA: mode = {mode!r}, epsilon = {config['epsilon']}")
     mga = MGA(
-        optimization_setup,
+        optimization_step,
         epsilon=config["epsilon"],
         postprocess_ctx={
             "scenarios": scenarios,

@@ -75,7 +75,10 @@ def run_oracle_mode(mga, oracle_cfg):
             "MGA oracle: no exploration axes configured; set "
             "plugins.mga.axes.technologies and/or axes.carrier_imports."
         )
-    tolerance = float(oracle_cfg["tolerance"])  # required, deliberately no default
+    # Required, deliberately no default (the schema's None means unset).
+    if oracle_cfg.get("tolerance") is None:
+        raise ValueError("MGA oracle: plugins.mga.oracle.tolerance must be set.")
+    tolerance = float(oracle_cfg["tolerance"])
     max_iterations = int(oracle_cfg.get("max_iterations", 200))
     initial_bounds = oracle_cfg.get("initial_bounds", "vmm")
     max_min_cfg = oracle_cfg.get("max_min", {})
@@ -134,7 +137,7 @@ def run_oracle_mode(mga, oracle_cfg):
     # The summary folder is a sibling of the per-iteration Postprocess
     # folders; the subfolder separates scenarios (empty for plain runs).
     out = (
-        Path(mga.optimization_setup.analysis.folder_output)
+        Path(mga.optimization_step.config.analysis.folder_output)
         / f"{mga.postprocess_ctx['model_name']}_oracle_summary"
         / mga.postprocess_ctx["subfolder"]
     )

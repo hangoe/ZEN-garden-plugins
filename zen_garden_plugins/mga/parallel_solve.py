@@ -12,10 +12,11 @@ since gurobipy has documented fork-safety caveats. That means `mga` has to
 survive a real `pickle` round trip once per spawned worker -- cheaper than
 rebuilding the model from scratch, but `pint.UnitRegistry`, a solved
 `linopy.Model`'s live gurobipy handle, and any stray `pint.Quantity` aren't
-picklable across processes as-is. `_patch_unit_handling_for_pickling` and
-`_patch_linopy_model_for_pickling` (below) teach the two classes involved to
+picklable across processes as-is. `_patch_unit_converter_for_pickling`,
+`_patch_parameter_registry_for_pickling` and
+`_patch_linopy_model_for_pickling` (below) teach the classes involved to
 drop/rebuild the offending state around the pickle boundary; `_RegistryBootstrap`
-handles the `Quantity` case. All three run unconditionally at import time
+handles the `Quantity` case. All of them run unconditionally at import time
 (not just when the parent constructs the pool) -- a spawned worker
 re-imports this module fresh, as its own process, before unpickling
 `initargs`, so anything that must be in place *before* unpickling `mga` has
@@ -39,26 +40,29 @@ if TYPE_CHECKING:
 _MGA: "MGA | None" = None
 
 
-def _patch_unit_handling_for_pickling() -> None:
+def _patch_unit_converter_for_pickling() -> None:
     """Make `mga` (and thus `initargs`) survive `spawn`'s pickling.
 
-    `optimization_setup.energy_system.unit_handling.ureg` is a plain
-    `pint.UnitRegistry()`. pint's built-in conversion contexts (e.g.
+    `optimization_step.unit_converter.ureg` (also held by every element) is a
+    plain `pint.UnitRegistry()`. pint's built-in conversion contexts (e.g.
     "spectroscopy", "boltzmann") each store a `Relation.transformation`
     closure -- a locally-defined lambda -- in `Context.funcs`, so *any*
     `UnitRegistry()` instance is unpicklable out of the box (reproduces with
     a bare `pickle.dumps(pint.UnitRegistry())`). `ureg` is reachable from
-    `mga` via `optimization_setup`, so it breaks pickling `initargs=(mga,)`
+    `mga` via `optimization_step`, so it breaks pickling `initargs=(mga,)`
     for spawned workers.
 
-    `UnitHandling.get_base_units()` deterministically rebuilds `ureg` (plus
-    `base_units`/`dim_matrix`) from `self.folder_path` alone, so it's safe to
-    drop `ureg` before pickling and rebuild it after unpickling in each
-    worker, rather than trying to transmit the pint registry itself.
+    `UnitConverter._get_base_units()` deterministically rebuilds `ureg`'s
+    custom definitions (plus `base_units`/`dim_matrix`) from
+    `self.folder_path` alone, so it's safe to drop `ureg` before pickling and
+    rebuild it after unpickling in each worker, rather than trying to
+    transmit the pint registry itself. Patched from the plugin, so
+    ZEN-garden itself stays untouched.
     """
-    from zen_garden.preprocess.unit_handling import UnitHandling
+    import pint
+    from zen_garden.input.unit_converter import UnitConverter
 
-    if getattr(UnitHandling, "_mga_batch_pickle_patched", False):
+    if getattr(UnitConverter, "_mga_batch_pickle_patched", False):
         return
 
     def __getstate__(self):
@@ -68,24 +72,25 @@ def _patch_unit_handling_for_pickling() -> None:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        self.get_base_units()
+        self.ureg = pint.UnitRegistry()
+        self._get_base_units()
 
-    UnitHandling.__getstate__ = __getstate__
-    UnitHandling.__setstate__ = __setstate__
-    UnitHandling._mga_batch_pickle_patched = True
+    UnitConverter.__getstate__ = __getstate__
+    UnitConverter.__setstate__ = __setstate__
+    UnitConverter._mga_batch_pickle_patched = True
 
 
 def _patch_linopy_model_for_pickling() -> None:
     """Drop the live solver handle before pickling `mga` for a spawned worker.
 
-    After `optimization_setup.solve()`, `linopy.Model.solver_model` holds the
+    After `optimization_step.solve()`, `linopy.Model.solver_model` holds the
     live gurobipy `Model` -- a thin Python wrapper around a C pointer
     (`PyCapsule`), which cannot be serialized (or meaningfully handed to a
     different process; a Gurobi model/env is tied to the process that
     created it). `Model` is a `__slots__` class with no `__dict__`, so this
     needs its own `__getstate__`/`__setstate__` rather than a dict patch.
 
-    Each worker's first `solve_direction()` call runs `optimization_setup
+    Each worker's first `solve_direction()` call runs `optimization_step
     .solve()`, which resets `solver_model = None` before building its own
     fresh solver connection -- so dropping it here (rather than rebuilding
     it, as with `ureg`) is enough; nothing reads it before that first solve.
@@ -111,6 +116,29 @@ def _patch_linopy_model_for_pickling() -> None:
     Model._mga_batch_pickle_patched = True
 
 
+def _patch_parameter_registry_for_pickling() -> None:
+    """Let ZEN-garden's `ParameterRegistry` be unpickled in a spawned worker.
+
+    `ParameterRegistry.__getattr__` (a fallback for dynamically-added
+    parameters) reads `self.dict_parameters`. While unpickling, pickle looks
+    up `__setstate__` on the still-empty instance; with no class-level
+    `__setstate__` that lookup falls through to `__getattr__`, whose own
+    `self.dict_parameters` access falls through again -- RecursionError.
+    A plain class-level `__setstate__` is found by normal attribute lookup,
+    so `__getattr__` is never reached while the state is empty.
+    """
+    from zen_garden.model.registries.parameter import ParameterRegistry
+
+    if getattr(ParameterRegistry, "_mga_batch_pickle_patched", False):
+        return
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+    ParameterRegistry.__setstate__ = __setstate__
+    ParameterRegistry._mga_batch_pickle_patched = True
+
+
 def _install_application_registry(folder_path, rounding_decimal_points_units) -> None:
     """Rebuild ZEN-garden's custom-unit registry and install it as pint's
     process-global default, so `pint.Quantity.__reduce__` can resolve
@@ -125,10 +153,10 @@ def _install_application_registry(folder_path, rounding_decimal_points_units) ->
     with `UndefinedUnitError` the moment a `Quantity` using it is unpickled.
     """
     import pint
-    from zen_garden.preprocess.unit_handling import UnitHandling
+    from zen_garden.input.unit_converter import UnitConverter
 
     pint.set_application_registry(
-        UnitHandling(folder_path, rounding_decimal_points_units).ureg
+        UnitConverter(folder_path, rounding_decimal_points_units).ureg
     )
 
 
@@ -154,7 +182,8 @@ class _RegistryBootstrap:
 # Applied at import time, not lazily inside ForkedBatchSupportFunction.__init__:
 # a spawned worker re-imports this module (to resolve _worker_init/_solve_one)
 # *before* unpickling initargs, so these must already be in effect by then.
-_patch_unit_handling_for_pickling()
+_patch_unit_converter_for_pickling()
+_patch_parameter_registry_for_pickling()
 _patch_linopy_model_for_pickling()
 
 
@@ -200,7 +229,7 @@ class ForkedBatchSupportFunction:
     """
 
     def __init__(self, mga: "MGA", n_workers: int):
-        solver_name = mga.optimization_setup.solver.name
+        solver_name = mga.optimization_step.config.solver.name
         start_method = "spawn" if solver_name == "gurobi" else "fork"
         mp_context = multiprocessing.get_context(start_method)
         logging.info(
@@ -208,9 +237,9 @@ class ForkedBatchSupportFunction:
             f"worker start method, {n_workers} workers."
         )
 
-        unit_handling = mga.optimization_setup.energy_system.unit_handling
+        unit_converter = mga.optimization_step.unit_converter
         registry_bootstrap = _RegistryBootstrap(
-            unit_handling.folder_path, unit_handling.rounding_decimal_points_units
+            unit_converter.folder_path, unit_converter.rounding_decimal_points_units
         )
         self._executor = ProcessPoolExecutor(
             max_workers=n_workers,

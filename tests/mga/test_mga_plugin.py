@@ -742,7 +742,7 @@ def _capex_data_array():
         "set_technologies": ["nuclear", "transport_ab"],
         "set_capacity_types": ["power"],
         "set_location": ["DE", "CH", "AB"],
-        "set_time_steps_yearly": [0, 1, 2],
+        "set_years": [0, 1, 2],
     }
     data = np.full((2, 1, 3, 3), np.nan)
     data[0, 0, 0, :] = [10.0, 20.0, 30.0]  # nuclear @ DE, years 0/1/2
@@ -754,7 +754,7 @@ def _capex_data_array():
             "set_technologies",
             "set_capacity_types",
             "set_location",
-            "set_time_steps_yearly",
+            "set_years",
         ],
         coords=coords,
     )
@@ -767,8 +767,8 @@ def _node_capex_stub(axis_year_indices=None, capex_discount_factor=None):
         # hold unless a test opts into a real factor.
         capex_discount_factor = xr.DataArray(
             [1.0, 1.0, 1.0],
-            dims=["set_time_steps_yearly"],
-            coords={"set_time_steps_yearly": [0, 1, 2]},
+            dims=["set_years"],
+            coords={"set_years": [0, 1, 2]},
         )
     return SimpleNamespace(
         _axis_year_indices=axis_year_indices or {},
@@ -805,8 +805,8 @@ def test_node_capex_axis_applies_discount_factor():
     capex before summing, instead of the old plain undiscounted sum."""
     factor = xr.DataArray(
         [1.0, 2.0, 4.0],
-        dims=["set_time_steps_yearly"],
-        coords={"set_time_steps_yearly": [0, 1, 2]},
+        dims=["set_years"],
+        coords={"set_years": [0, 1, 2]},
     )
     axis = Axis("DE", NODE_CAPEX, ("DE",), None)
     stub = _node_capex_stub(capex_discount_factor=factor)
@@ -819,8 +819,8 @@ def test_node_capex_cumulative_axis_applies_discount_factor_within_its_year_wind
     narrows the year window, using each selected year's own factor."""
     factor = xr.DataArray(
         [1.0, 2.0, 4.0],
-        dims=["set_time_steps_yearly"],
-        coords={"set_time_steps_yearly": [0, 1, 2]},
+        dims=["set_years"],
+        coords={"set_years": [0, 1, 2]},
     )
     axis = Axis("DE_until_2030", NODE_CAPEX_CUMULATIVE, ("DE",), None, period=(None, 1))
     stub = _node_capex_stub({"DE_until_2030": [0, 1]}, capex_discount_factor=factor)
@@ -866,7 +866,7 @@ def _capex_data_array_multi_tech():
         "set_technologies": ["nuclear", "pv"],
         "set_capacity_types": ["power"],
         "set_location": ["DE"],
-        "set_time_steps_yearly": [0, 1, 2],
+        "set_years": [0, 1, 2],
     }
     data = np.empty((2, 1, 1, 3))
     data[0, 0, 0, :] = [10.0, 20.0, 30.0]  # nuclear @ DE, years 0/1/2
@@ -877,7 +877,7 @@ def _capex_data_array_multi_tech():
             "set_technologies",
             "set_capacity_types",
             "set_location",
-            "set_time_steps_yearly",
+            "set_years",
         ],
         coords=coords,
     )
@@ -925,7 +925,7 @@ def _capex_data_array_multi_node_multi_tech():
         "set_technologies": ["nuclear", "pv"],
         "set_capacity_types": ["power"],
         "set_location": ["DE", "CH"],
-        "set_time_steps_yearly": [0, 1, 2],
+        "set_years": [0, 1, 2],
     }
     data = np.empty((2, 1, 2, 3))
     data[0, 0, 0, :] = [10.0, 20.0, 30.0]  # nuclear @ DE, years 0/1/2
@@ -938,7 +938,7 @@ def _capex_data_array_multi_node_multi_tech():
             "set_technologies",
             "set_capacity_types",
             "set_location",
-            "set_time_steps_yearly",
+            "set_years",
         ],
         coords=coords,
     )
@@ -952,8 +952,8 @@ def _reference_total_stub(axis_year_indices=None, all_nodes=None, capex_discount
     if capex_discount_factor is None:
         capex_discount_factor = xr.DataArray(
             [1.0, 1.0, 1.0],
-            dims=["set_time_steps_yearly"],
-            coords={"set_time_steps_yearly": [0, 1, 2]},
+            dims=["set_years"],
+            coords={"set_years": [0, 1, 2]},
         )
     stub = SimpleNamespace(
         _axis_year_indices=axis_year_indices or {},
@@ -1030,7 +1030,7 @@ def _emissions_data_array():
     coords = {
         "set_technologies": ["nuclear", "transport_ab"],
         "set_location": ["DE", "CH", "AB"],
-        "set_time_steps_yearly": [0, 1, 2],
+        "set_years": [0, 1, 2],
     }
     data = np.full((2, 3, 3), np.nan)
     data[0, 0, :] = [10.0, 20.0, 30.0]  # nuclear @ DE, years 0/1/2
@@ -1038,7 +1038,7 @@ def _emissions_data_array():
     data[1, 2, :] = [100.0, 100.0, 100.0]  # transport_ab @ edge AB
     return xr.DataArray(
         data,
-        dims=["set_technologies", "set_location", "set_time_steps_yearly"],
+        dims=["set_technologies", "set_location", "set_years"],
         coords=coords,
     )
 
@@ -1047,8 +1047,8 @@ def _emissions_stub(axis_year_indices=None, emissions_interval_factor=None):
     if emissions_interval_factor is None:
         emissions_interval_factor = xr.DataArray(
             [1.0, 1.0, 1.0],
-            dims=["set_time_steps_yearly"],
-            coords={"set_time_steps_yearly": [0, 1, 2]},
+            dims=["set_years"],
+            coords={"set_years": [0, 1, 2]},
         )
     return SimpleNamespace(
         _axis_year_indices=axis_year_indices or {},
@@ -1073,8 +1073,8 @@ def test_node_carbon_emissions_cumulative_axis_lumps_multiple_nodes():
 def test_node_carbon_emissions_cumulative_axis_applies_interval_expansion_factor():
     factor = xr.DataArray(
         [1.0, 2.0, 4.0],
-        dims=["set_time_steps_yearly"],
-        coords={"set_time_steps_yearly": [0, 1, 2]},
+        dims=["set_years"],
+        coords={"set_years": [0, 1, 2]},
     )
     axis = Axis("DE_until_2050", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE",), None, period=(None, 2))
     stub = _emissions_stub({"DE_until_2050": [0, 1, 2]}, emissions_interval_factor=factor)
@@ -1096,7 +1096,7 @@ def _capacity_stock_data_array():
         "set_technologies": ["pv", "nuclear", "wind"],
         "set_capacity_types": ["power"],
         "set_location": ["DE", "CH"],
-        "set_time_steps_yearly": [0, 1],
+        "set_years": [0, 1],
     }
     data = np.zeros((3, 1, 2, 2))
     data[0, 0, 0, :] = [30.0, 40.0]  # pv @ DE, years 0/1
@@ -1106,13 +1106,13 @@ def _capacity_stock_data_array():
     # wind stays all zero
     return xr.DataArray(
         data,
-        dims=["set_technologies", "set_capacity_types", "set_location", "set_time_steps_yearly"],
+        dims=["set_technologies", "set_capacity_types", "set_location", "set_years"],
         coords=coords,
     )
 
 
 def _all_ones_capacity_mask(data_array):
-    return xr.ones_like(data_array.isel(set_location=0, set_time_steps_yearly=0, drop=True))
+    return xr.ones_like(data_array.isel(set_location=0, set_years=0, drop=True))
 
 
 def _ratio_stub(axis_year_indices, ratio_denominator_baseline, capacity_mask=None):
@@ -2096,10 +2096,10 @@ def _units_series(index_names, tuples, unit_strings):
     return pd.Series(unit_strings, index=index, dtype=str)
 
 
-# Level names as ZEN-garden builds them for the unit series: the dimensions'
-# documentation names, not the set names the variables are indexed by.
+# Level names as ZEN-garden v3 builds them for the unit series: the same set
+# names the variables are indexed by.
 CAPACITY_UNITS = _units_series(
-    ["technology", "capacity_type", "location", "year"],
+    ["set_technologies", "set_capacity_types", "set_location", "set_years"],
     [
         ("nuclear", "power", "DE", 2050),
         ("battery", "power", "DE", 2050),
@@ -2108,12 +2108,12 @@ CAPACITY_UNITS = _units_series(
     ["gigawatt", "gigawatt", "gigawatt_hour"],
 )
 IMPORT_UNITS = _units_series(
-    ["carrier", "node", "time_operation"],
+    ["set_carriers", "set_nodes", "set_time_steps_operation"],
     [("biomass", "DE", 0), ("hydrogen", "DE", 0)],
     ["gigawatt", "gigawatt"],
 )
 CAPEX_UNITS = _units_series(
-    ["technology", "capacity_type", "location", "year"],
+    ["set_technologies", "set_capacity_types", "set_location", "set_years"],
     [
         ("nuclear", "power", "DE", 2050),
         ("battery", "power", "CH", 2050),
@@ -2121,7 +2121,7 @@ CAPEX_UNITS = _units_series(
     ["megaEuro", "megaEuro"],
 )
 CAPEX_UNITS_MULTI_TECH = _units_series(
-    ["technology", "capacity_type", "location", "year"],
+    ["set_technologies", "set_capacity_types", "set_location", "set_years"],
     [
         ("nuclear", "power", "DE", 2050),
         ("pv", "power", "DE", 2050),
@@ -2186,7 +2186,7 @@ def test_node_capex_cumulative_tech_axis_unit_is_masked_to_the_selected_technolo
 
 
 EMISSIONS_UNITS = _units_series(
-    ["technology", "location", "time_operation"],
+    ["set_technologies", "set_location", "set_time_steps_operation"],
     [
         ("nuclear", "DE", 0),
         ("nuclear", "CH", 0),
@@ -2239,3 +2239,170 @@ def test_cost_axis_reads_the_cost_variable_unit():
 def test_unit_is_none_when_the_model_tracks_no_units():
     axis = Axis("nuclear", TECH_CAPACITY, ("nuclear",), "power")
     assert axis_physical_unit(axis, {}, pint.UnitRegistry()) is None
+
+
+# ------------------------------------------------ ZEN-garden v3 plugin interface
+
+
+def test_plugin_exposes_a_config_base_schema():
+    from zen_garden.config import ConfigBase
+
+    from zen_garden_plugins.mga import plugin
+
+    assert issubclass(plugin.Config, ConfigBase)
+
+
+def test_zen_garden_loader_validates_and_fills_defaults():
+    from zen_garden.config import Config as ZenConfig
+    from zen_garden.plugin_system.loader import register_plugins
+
+    run_config = ZenConfig(
+        plugins={"mga": {"mode": "batch", "batch": {"tolerance_prob": 0.9}}}
+    )
+    register_plugins(run_config, source_package="zen_garden_plugins")
+    stored = run_config.plugins["mga"]
+    assert stored["mode"] == "batch"
+    assert stored["batch"]["tolerance_prob"] == 0.9
+    assert stored["epsilon"] == 0.1  # default materialised by model_dump()
+
+
+def test_zen_garden_loader_rejects_unknown_keys():
+    from zen_garden.config import Config as ZenConfig
+    from zen_garden.plugin_system.loader import register_plugins
+
+    run_config = ZenConfig(plugins={"mga": {"epsilonn": 0.1}})
+    with pytest.raises(ValueError, match="epsilonn"):
+        register_plugins(run_config, source_package="zen_garden_plugins")
+
+
+def test_schema_defaults_match_the_v2_driver_defaults():
+    """The loader stores model_dump(), so every default is materialised; each
+    must equal the .get() default its driver applied before the schema."""
+    cfg = validate_config({}).model_dump()
+    assert cfg["epsilon"] == 0.1
+    assert cfg["mode"] == "weights"
+    assert cfg["normalisation"] == "relative"
+    assert cfg["per_axes_capex_reference"] == 15e12
+    assert cfg["iterations"] == []
+    assert cfg["axes"]["include_cost"] is False
+    assert cfg["oracle"]["max_iterations"] == 200
+    assert cfg["oracle"]["initial_bounds"] == "vmm"
+    assert cfg["oracle"]["max_min"] == {
+        "formulation": "kkt_milp",
+        "use_bigM": True,
+        "big_M": 1e8,
+        "t_max": None,
+        "solver_options": {},
+        "certificate_time_limit": 0.0,
+    }
+    for block in ("sampling", "bbo", "batch"):
+        assert cfg[block]["tolerance_prob"] is None
+        assert cfg[block]["max_iterations"] == 200
+        assert cfg[block]["tolerance_explore"] == 0.1
+        assert cfg[block]["n_samples"] == 1000
+        assert cfg[block]["alpha"] == 0.05
+        assert cfg[block]["method"] == "jeffreys"
+        assert cfg[block]["initial_bounds"] == "vmm"
+        assert cfg[block]["seed_rng"] is None
+        assert cfg[block]["track_implied_threshold"] is False
+    assert cfg["sampling"]["use_bounding_box"] is False
+    assert cfg["bbo"]["use_bounding_box"] is False
+    assert cfg["batch"]["use_bounding_box"] is True
+    assert cfg["bbo"]["max_function_evaluations"] == 2000
+    assert cfg["bbo"]["n_restarts"] == 1
+    assert cfg["bbo"]["optimizer_options"] is None
+    assert cfg["batch"]["batch_size"] == 4
+    assert cfg["batch"]["strategy_mode"] == "sampling"
+    assert cfg["batch"]["convergence_mode"] == "ci"
+    assert cfg["batch"]["bbo_enabled"] is True
+    assert cfg["batch"]["n_workers"] is None
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"epsilon": "0.1"},  # strict: no string -> float coercion
+        {"epsilon": 0.0},
+        {"mode": "random"},
+        {"axes": {"node_capex_cumulative": {"until_years": [2030.0]}}},
+        {"batch": {"batch_size": 4.5}},
+    ],
+)
+def test_invalid_config_values_are_rejected(cfg):
+    with pytest.raises(ValueError):
+        validate_config(cfg)
+
+
+def _step_stub(plugins_mga, use_rolling_horizon=False, use_scaling=False):
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            plugins={"mga": plugins_mga},
+            system=SimpleNamespace(use_rolling_horizon=use_rolling_horizon),
+            solver=SimpleNamespace(use_scaling=use_scaling),
+            analysis=SimpleNamespace(objective="total_cost"),
+        )
+    )
+
+
+def _run_mga(step):
+    from zen_garden_plugins.mga.plugin import run_mga
+
+    return run_mga(
+        optimization_step=step,
+        scenarios={"": {}},
+        subfolder="",
+        model_name="model",
+        scenario_name="",
+        param_map=None,
+    )
+
+
+def test_run_mga_takes_the_v3_after_solve_kwargs_and_rejects_rolling_horizon():
+    with pytest.raises(ValueError, match="rolling-horizon"):
+        _run_mga(_step_stub({"mode": "weights"}, use_rolling_horizon=True))
+
+
+def test_run_mga_rejects_scaled_models():
+    with pytest.raises(ValueError, match="use_scaling"):
+        _run_mga(_step_stub({"mode": "weights"}, use_scaling=True))
+
+
+def test_run_mga_skips_weights_mode_without_iterations():
+    assert _run_mga(_step_stub({"mode": "weights"})) is None
+
+
+def test_projection_model_registers_its_variables_for_postprocess():
+    """v3 Postprocess looks every solution variable up in the variable
+    registry, so the oracle projection variables need entries there."""
+    import linopy
+
+    lp = linopy.Model()
+    x = lp.add_variables(lower=0, upper=1, name="x")
+    registry = SimpleNamespace(units={}, docs={})
+    stub = SimpleNamespace(
+        z_names=["a"],
+        axes=[SimpleNamespace(name="a")],
+        n_z=1,
+        scale=np.array([1.0]),
+        model=lp,
+        optimization_model=SimpleNamespace(variables=registry),
+        axis_expression=lambda axis: 1.0 * x,
+        z_star_norm=np.array([0.5]),
+    )
+    MGA.setup_projection_model(stub)
+    assert registry.units == {"mga_oracle_delta": None, "mga_oracle_t": None}
+    assert set(registry.docs) == {"mga_oracle_delta", "mga_oracle_t"}
+
+
+def test_parameter_registry_survives_pickling_for_spawned_batch_workers():
+    """v3's ParameterRegistry.__getattr__ recursed while unpickling."""
+    import pickle
+
+    from zen_garden.model.registries.parameter import ParameterRegistry
+
+    import zen_garden_plugins.mga.parallel_solve  # noqa: F401  (applies patches)
+
+    registry = object.__new__(ParameterRegistry)
+    registry.__dict__.update(dict_parameters={"a": 1}, docs={})
+    restored = pickle.loads(pickle.dumps(registry))
+    assert restored.dict_parameters == {"a": 1}
