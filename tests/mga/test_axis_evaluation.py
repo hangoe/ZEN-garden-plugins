@@ -127,13 +127,48 @@ class TestCapexCumulative:
         assert evaluator.share_reference_value(axis) == pytest.approx(75.0)
 
 
+def _carrier_emissions(scale=0.0):
+    """Annual carbon_emissions_carrier stand-in: gas imported at DE and CH."""
+    data = np.zeros((2, 2, 3))
+    data[0, 0, :] = [1.0, 2.0, 4.0]  # natural_gas @ DE
+    data[0, 1, :] = [100.0, 100.0, 100.0]  # natural_gas @ CH
+    data[1, 0, :] = [0.5, 0.5, 0.5]  # coal @ DE
+    return xr.DataArray(
+        scale * data,
+        dims=["set_carriers", "set_nodes", "set_years"],
+        coords={
+            "set_carriers": ["natural_gas", "coal"],
+            "set_nodes": ["DE", "CH"],
+            "set_years": YEARS,
+        },
+    )
+
+
 class TestEmissionsCumulative:
-    def _evaluator(self, years, factor=None):
+    def _evaluator(self, years, factor=None, carrier_scale=0.0):
         return evaluator_stub(
             carbon_emissions_yearly=FakeSolved(_emissions()),
+            carbon_emissions_carrier_yearly=FakeSolved(
+                _carrier_emissions(carrier_scale)
+            ),
             axis_year_indices={"a": years},
             emissions_interval_factor=factor if factor is not None else _factor(),
         )
+
+    def test_adds_carrier_emissions_at_the_member_nodes(self):
+        axis = Axis("a", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE",), None, (None, 1))
+        # technology 10 + 20, carrier (1 + 0.5) + (2 + 0.5); CH's gas excluded
+        assert self._evaluator([0, 1], carrier_scale=1.0).value(axis) == (
+            pytest.approx(34.0)
+        )
+
+    def test_carrier_emissions_get_the_interval_expansion_factor(self):
+        axis = Axis("a", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE",), None, (None, 2))
+        evaluator = self._evaluator(
+            YEARS, _factor((1.0, 2.0, 4.0)), carrier_scale=1.0
+        )
+        # technology 170, carrier 1.5*1 + 2.5*2 + 4.5*4 = 24.5
+        assert evaluator.value(axis) == pytest.approx(194.5)
 
     def test_restricts_to_years_and_drops_transport(self):
         axis = Axis("a", NODE_CARBON_EMISSIONS_CUMULATIVE, ("DE",), None, (None, 1))

@@ -236,10 +236,16 @@ axes, each in config order, then the cost axis.
     when ZEN-garden's unit tracking is on).
 
 ``node_carbon_emissions_cumulative`` (``nodes``, ``until_years``)
-    Annualised ``carbon_emissions_technology`` of the member nodes up to
-    ``until_year``, interval-expanded like the capex axes but not
-    discounted. Values can be negative (negative-emission technologies such
-    as DAC), so these axes are neither clipped at 0 nor monotone. Use
+    Annualised ``carbon_emissions_technology`` plus
+    ``carbon_emissions_carrier`` of the member nodes up to ``until_year``,
+    i.e. the node's share of ``carbon_emissions_annual``, which the carbon
+    budget limits. Interval-expanded like the capex axes but not
+    discounted. Carrier emissions count at the node where the carrier is
+    imported or exported (e.g. natural gas at its import node, not where it
+    is burned); technology emissions of transport technologies (on edges)
+    are not counted. Values can be negative (negative-emission technologies
+    such as DAC, or carbon storage), so these axes are neither clipped at 0
+    nor monotone. Use
     distinct group names from ``node_capex_cumulative`` (e.g. ``DE`` and
     ``DE_co2``), since both name their axes ``<group>_until_<year>``.
 

@@ -43,6 +43,7 @@ _OUTPUT_DIMS = [
     "set_years",
 ]
 _EMISSIONS_DIMS = ["set_technologies", "set_location", "set_years"]
+_EMISSIONS_CARRIER_DIMS = ["set_carriers", "set_nodes", "set_years"]
 _CAPEX_DIMS = ["set_technologies", "set_capacity_types", "set_years", "set_location"]
 
 
@@ -188,14 +189,20 @@ class AxisEvaluator:
         self.cost_capex_yearly = (
             variables["cost_capex_yearly"] if NODE_CAPEX_CUMULATIVE in kinds else None
         )
-        # Instantaneous rates, annualised once like ZEN-garden does.
+        # Instantaneous rates, annualised once like ZEN-garden does. Both
+        # parts of carbon_emissions_annual (what the budget limits) are
+        # needed: fuel CO2 is usually booked on the carriers, at import.
         self.carbon_emissions_yearly = None
+        self.carbon_emissions_carrier_yearly = None
         if NODE_CARBON_EMISSIONS_CUMULATIVE in kinds:
             year_op_duration = GenericConstraint.get_year_time_step_duration_array(
                 optimization_step
             )
             self.carbon_emissions_yearly = (
                 variables["carbon_emissions_technology"] * year_op_duration
+            ).sum("set_time_steps_operation")
+            self.carbon_emissions_carrier_yearly = (
+                variables["carbon_emissions_carrier"] * year_op_duration
             ).sum("set_time_steps_operation")
         self.flow_conversion_output_yearly = None
         if NODE_OUTPUT_RATIO in kinds:
@@ -306,6 +313,7 @@ class AxisEvaluator:
             "capacity": self.capacity,
             "capex": self.cost_capex_yearly,
             "emissions": self.carbon_emissions_yearly,
+            "emissions_carrier": self.carbon_emissions_carrier_yearly,
             "output": self.flow_conversion_output_yearly,
         }
         if not solution:
@@ -363,10 +371,20 @@ class AxisEvaluator:
         return numerator / self.ratio_denominator[axis.name]
 
     def _emissions_cumulative(self, axis, src, year_ids):
-        term = src["emissions"].sel(set_location=list(axis.members))
-        term = term.sel(set_years=year_ids)
-        term = term * self.emissions_interval_factor
-        return term.sum(_EMISSIONS_DIMS)
+        """Technology plus carrier emissions of the member nodes.
+
+        Carrier emissions count at the node where the carrier is imported or
+        exported; technology emissions on edges (transport) are dropped.
+        """
+        technology = (
+            src["emissions"].sel(set_location=list(axis.members), set_years=year_ids)
+            * self.emissions_interval_factor
+        ).sum(_EMISSIONS_DIMS)
+        carrier = (
+            src["emissions_carrier"].sel(set_nodes=list(axis.members), set_years=year_ids)
+            * self.emissions_interval_factor
+        ).sum(_EMISSIONS_CARRIER_DIMS)
+        return technology + carrier
 
     # ------------------------------------------------------------------
     # frozen ratio denominators
