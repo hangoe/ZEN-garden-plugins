@@ -1,16 +1,14 @@
-"""Pydantic schema of the MGA plugin's "plugins.mga" config block.
+"""Pydantic schema of the ``plugins.mga`` config block.
 
-ZEN-garden v3's plugin loader validates the user's block against the
-module-level `Config` class of plugin.py (re-exported from here) and stores
-`Config.model_validate(block).model_dump()` back into the run config, so
-every default below is materialised explicitly. Each default therefore
-mirrors the `.get(key, default)` its driver applied under v2, so a block that
-omits a key still behaves exactly as before.
+ZEN-garden's plugin loader validates the user's block against the
+module-level ``Config`` of ``plugin.py`` (re-exported from here) and stores
+``Config.model_validate(block).model_dump()`` back into the run config. This
+module is the only place that defines defaults; the drivers read the typed
+fields directly.
 
-`ConfigBase` is strict and forbids extra keys: unknown keys and wrong types
-(e.g. "0.1" for a float) are rejected. The schema checks structure and types
-only; whether axis members exist in the model is checked later, against the
-built model, by axes.build_axis_groups.
+``ConfigBase`` is strict and forbids extra keys. The schema checks structure,
+types and cross-field rules; whether axis members exist in the model is
+checked later, against the built model, by ``axes.build_axes``.
 """
 
 import math
@@ -20,8 +18,13 @@ from pydantic import ValidationError, field_validator, model_validator
 from zen_garden.config import ConfigBase
 
 # An axis-list entry: a member name (singleton axis) or a single-key
-# {group_name: [member, ...]} dict (lumped axis); see axes._parse_axis_list.
+# {group_name: [member, ...]} dict (lumped axis).
 AxisEntry = str | dict[str, list[str]]
+
+# Initial bounds: "vmm" (solve min/max LPs) or {axis: [lower, upper]}.
+InitialBounds = Literal["vmm"] | dict[str, list[float]]
+
+Normalisation = Literal["relative", "minmax", "share", "per_axes"]
 
 
 class NodeCapexCumulative(ConfigBase):
@@ -31,23 +34,8 @@ class NodeCapexCumulative(ConfigBase):
     until_years: list[int] | None = None
 
 
-class NodeCapexByTechnology(ConfigBase):
-    """axes.node_capex_by_technology: per-node capex of a technology group."""
-
-    nodes: list[AxisEntry] | None = None
-    technology_groups: list[AxisEntry] | None = None
-
-
-class NodeCapexCumulativeTech(ConfigBase):
-    """axes.node_capex_cumulative_tech: both restrictions at once."""
-
-    nodes: list[AxisEntry] | None = None
-    until_years: list[int] | None = None
-    technology_groups: list[AxisEntry] | None = None
-
-
 class RatioGroup(ConfigBase):
-    """One node_capacity_ratio group: numerator/denominator technologies."""
+    """One ratio group: numerator and denominator technologies."""
 
     numerator: list[str]
     denominator: list[str]
@@ -82,10 +70,7 @@ class AxesConfig(ConfigBase):
     technologies: list[AxisEntry] | None = None
     carrier_imports: list[AxisEntry] | None = None
     include_cost: bool = False
-    node_capex: list[AxisEntry] | None = None
     node_capex_cumulative: NodeCapexCumulative | None = None
-    node_capex_by_technology: NodeCapexByTechnology | None = None
-    node_capex_cumulative_tech: NodeCapexCumulativeTech | None = None
     node_capacity_ratio: NodeCapacityRatio | None = None
     node_output_ratio: NodeOutputRatio | None = None
     node_carbon_emissions_cumulative: NodeCarbonEmissionsCumulative | None = None
@@ -101,25 +86,33 @@ class MaxMinConfig(ConfigBase):
     solver_options: dict[str, Any] = {}
     certificate_time_limit: float = 0.0
 
-
-# Initial bounds: "vmm" (solve min/max LPs) or {axis: [lower, upper]}.
-InitialBounds = Literal["vmm"] | dict[str, list[float]]
+    @field_validator("formulation")
+    @classmethod
+    def _only_kkt_milp(cls, value: str) -> str:
+        value = value.lower()
+        if value != "kkt_milp":
+            raise ValueError(
+                f"MGA oracle: formulation {value!r} not implemented; only "
+                "'kkt_milp' is supported."
+            )
+        return value
 
 
 class OracleConfig(ConfigBase):
-    """plugins.mga.oracle (mode "oracle")."""
+    """plugins.mga.oracle (mode "oracle"); tolerance is required there."""
 
-    # Required in oracle mode; checked by oracle_driver.run_oracle_mode.
     tolerance: float | None = None
     max_iterations: int = 200
     initial_bounds: InitialBounds = "vmm"
     max_min: MaxMinConfig = MaxMinConfig()
 
 
-class _SupportFunctionConfig(ConfigBase):
-    """Settings shared by the sampling, bbo and batch blocks."""
+class SupportFunctionConfig(ConfigBase):
+    """Settings shared by the sampling, bbo and batch blocks.
 
-    # Required in these modes; checked by the drivers.
+    tolerance_prob is required in these modes.
+    """
+
     tolerance_prob: float | None = None
     max_iterations: int = 200
     tolerance_explore: float = 0.1
@@ -132,11 +125,11 @@ class _SupportFunctionConfig(ConfigBase):
     track_implied_threshold: bool = False
 
 
-class SamplingConfig(_SupportFunctionConfig):
+class SamplingConfig(SupportFunctionConfig):
     """plugins.mga.sampling (mode "sampling")."""
 
 
-class BboConfig(_SupportFunctionConfig):
+class BboConfig(SupportFunctionConfig):
     """plugins.mga.bbo (mode "bbo")."""
 
     max_function_evaluations: int = 2000
@@ -144,8 +137,8 @@ class BboConfig(_SupportFunctionConfig):
     optimizer_options: dict[str, Any] | None = None
 
 
-class BatchConfig(_SupportFunctionConfig):
-    """plugins.mga.batch (mode "batch")."""
+class BatchConfig(SupportFunctionConfig):
+    """plugins.mga.batch (mode "batch"); n_workers None means one per CPU."""
 
     use_bounding_box: bool = True
     batch_size: int = 4
@@ -154,7 +147,6 @@ class BatchConfig(_SupportFunctionConfig):
     max_function_evaluations: int = 2000
     n_restarts: int = 1
     bbo_enabled: bool = True
-    # None -> os.cpu_count(), resolved in batch_driver.run_batch_mode.
     n_workers: int | None = None
 
 
@@ -169,9 +161,7 @@ class Config(ConfigBase):
 
     epsilon: float = 0.1
     mode: Literal["weights", "oracle", "sampling", "bbo", "batch"] = "weights"
-    normalisation: Literal["relative", "minmax", "units", "share", "per_axes"] = (
-        "relative"
-    )
+    normalisation: Normalisation = "minmax"
     per_axes_capex_reference: float = 15e12
     iterations: list[WeightsIteration] = []
     axes: AxesConfig = AxesConfig()
@@ -200,47 +190,49 @@ class Config(ConfigBase):
     @model_validator(mode="after")
     def _normalisation_fits_axes_and_mode(self) -> "Config":
         axes = self.axes
-        has_tech_or_carrier_axes = bool(axes.technologies or axes.carrier_imports)
-        if self.normalisation == "share" and has_tech_or_carrier_axes:
-            raise ValueError(
-                "MGA: normalisation='share' only supports capex axes "
-                "(node_capex / node_capex_cumulative / node_capex_by_technology / "
-                "node_capex_cumulative_tech); remove axes.technologies/"
-                "axes.carrier_imports or use a different normalisation."
-            )
-        if self.normalisation == "per_axes" and (
-            axes.technologies
-            or axes.carrier_imports
-            or axes.node_capex
-            or axes.node_capex_by_technology
-            or axes.node_capex_cumulative_tech
+        if self.normalisation in ("share", "per_axes") and (
+            axes.technologies or axes.carrier_imports
         ):
             raise ValueError(
-                "MGA: normalisation='per_axes' only supports node_capex_cumulative, "
-                "node_capacity_ratio, node_output_ratio and "
-                "node_carbon_emissions_cumulative axes (plus "
-                "the cost axis); remove axes.technologies/axes.carrier_imports/"
-                "axes.node_capex/axes.node_capex_by_technology/"
-                "axes.node_capex_cumulative_tech or use a different normalisation."
+                f"MGA: normalisation={self.normalisation!r} does not support "
+                "axes.technologies or axes.carrier_imports; remove them or use "
+                "'relative'/'minmax'."
+            )
+        if self.normalisation == "share" and (
+            axes.node_capacity_ratio
+            or axes.node_output_ratio
+            or axes.node_carbon_emissions_cumulative
+        ):
+            raise ValueError(
+                "MGA: normalisation='share' only supports node_capex_cumulative "
+                "axes (plus the cost axis)."
             )
         if self.mode == "oracle" and self.normalisation != "relative":
             raise ValueError(
-                f"MGA: normalisation={self.normalisation!r} is not supported in "
-                "oracle mode -- oracle's max-min MILP relies on big_M/t_max "
-                "dominating axis magnitudes and a cut-validity guard sized for "
-                "O(1) normalised coordinates anchored at offset=0, both of "
-                "which assume 'relative' normalisation. Use sampling or bbo "
-                "mode for 'units'/'minmax'/'share'/'per_axes'."
+                f"MGA: oracle mode requires normalisation: relative (got "
+                f"{self.normalisation!r}; the default is 'minmax', so set it "
+                "explicitly). See the docs, section Normalisation."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _required_fields_of_mode(self) -> "Config":
+        if self.mode == "oracle" and self.oracle.tolerance is None:
+            raise ValueError("MGA oracle: plugins.mga.oracle.tolerance must be set.")
+        if self.mode in ("sampling", "bbo", "batch"):
+            if getattr(self, self.mode).tolerance_prob is None:
+                raise ValueError(
+                    f"MGA {self.mode}: plugins.mga.{self.mode}.tolerance_prob "
+                    "must be set."
+                )
         return self
 
 
 def _format_validation_error(exc: ValidationError) -> str:
     """Readable one-message summary of a pydantic ValidationError.
 
-    Unknown keys are grouped per block ("Unknown MGA config key(s) in
-    plugins.mga.axes: [...]"), an unknown normalisation names the accepted
-    values, and everything else is reported with its dotted config path.
+    Unknown keys are grouped per block, an unknown normalisation names the
+    accepted values, and everything else is reported with its config path.
     """
     unknown: dict[str, list[str]] = {}
     messages = []
@@ -252,7 +244,7 @@ def _format_validation_error(exc: ValidationError) -> str:
         elif loc == ["normalisation"] and error["type"] == "literal_error":
             messages.append(
                 f"Unknown MGA normalisation: {error['input']!r}. Expected "
-                f"'relative', 'minmax', 'units', 'share' or 'per_axes'."
+                "'relative', 'minmax', 'share' or 'per_axes'."
             )
         else:
             msg = error["msg"].removeprefix("Value error, ")
@@ -264,11 +256,12 @@ def _format_validation_error(exc: ValidationError) -> str:
 
 
 def validate_config(cfg: dict) -> Config:
-    """Validate a plugins.mga block; return it as a typed `Config`.
+    """Validate a plugins.mga block and return it as a typed ``Config``.
 
-    Raises ValueError (not pydantic's ValidationError) with the readable
-    summary of `_format_validation_error`, so callers such as ZEN-models'
-    run_model.py can fail fast before the baseline solve.
+    Raises:
+        ValueError: With the readable summary of ``_format_validation_error``,
+            so callers such as ZEN-models' run_model.py can fail fast before
+            the baseline solve.
     """
     try:
         return Config.model_validate(cfg)

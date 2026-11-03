@@ -5,56 +5,63 @@ MGA (Modelling to Generate Alternatives)
 
 The ``mga`` plugin explores the near-optimal space of a ZEN-garden model:
 the set of designs whose total cost stays within ``(1 + epsilon)`` times the
-cost optimum. It subscribes to the ``after_solve`` event and re-solves the
-baseline model under a near-optimality budget in one of five modes:
+cost optimum. It subscribes to the ``after_solve`` event, adds the
+constraint ``total_cost <= (1 + epsilon) * C*`` to the solved baseline and
+re-solves the model under different objectives in one of five modes:
 
 * ``weights`` -- one re-solve per user-provided weight dict, minimising
-  ``sum_i w_i * axis_i`` over the axes named in the ``axes`` config block
-  (the classical MGA recipe, generalised from plain technology capacity to
-  any axis kind -- e.g. a node-capex or node-capex-period axis).
+  ``sum_i w_i * axis_i`` over the axes named in the ``axes`` block (the
+  classical MGA recipe, for any axis kind).
 * ``oracle`` -- the ORACLE algorithm (Turan, Moret, Bardow 2026,
   `doi:10.1016/j.compchemeng.2026.109630
-  <https://doi.org/10.1016/j.compchemeng.2026.109630>`_), which iteratively
-  refines inner and outer polytope approximations of the near-optimal space
-  until their maximal distance falls below a tolerance. Each iteration
-  solves a bilevel (nearest-point) problem, which is the most informative
-  choice per iteration but the most expensive.
-* ``sampling`` -- pyoNearOpt's sampling support-function method. It refines
-  the same inner/outer approximations, but instead of the bilevel solve it
-  samples directions and probes each with a single, cheap support-function
-  LP (``max direction . design``), stopping once a confidence interval on
-  the fraction of well-approximated directions clears a target. Cheaper per
-  iteration than oracle mode and scales better to many exploration axes, at
-  the cost of a probabilistic (rather than certified) coverage guarantee.
-* ``bbo`` -- the same support-function pipeline as ``sampling``, but each
-  direction is instead chosen by a black-box optimiser (SHADE) searching
-  for the largest gap between the inner and outer approximations, rather
-  than by sampling. Can be more effective per query in high dimensions, at
-  the cost of no convergence guarantee on the direction search itself
-  (overall convergence is still decided by the same confidence-interval
-  metric as ``sampling``).
-* ``batch`` -- the same support-function pipeline as ``sampling``/``bbo``,
-  but each iteration probes a *batch* of up to ``batch_size`` directions
-  concurrently, via a persistent pool of worker processes (one process per
-  direction, up to ``n_workers``), instead of one direction at a time. The
-  LP solve, not ZEN-garden's one-time input-read/model-construction step,
-  is the bottleneck a batch is meant to parallelize, so this can give a
-  real, close-to-``n_workers`` speedup on multi-core hardware (e.g. an
-  Euler compute node) with no change to the modelled problem.
+  <https://doi.org/10.1016/j.compchemeng.2026.109630>`_). It refines an inner
+  and an outer polytope approximation of the near-optimal space until their
+  maximal distance falls below a tolerance. Each iteration solves a max-min
+  MILP and a projection; it is the most informative choice per iteration but
+  the most expensive. See `Oracle mode`_.
+* ``sampling`` -- pyoNearOpt's sampling support-function method: it samples
+  directions and probes each with one cheap LP (``max direction . z``), and
+  stops once a confidence interval on the fraction of well-approximated
+  directions clears a target. Cheaper per iteration than oracle and scales
+  better to many axes, with a probabilistic instead of a certified coverage
+  guarantee. See `Support-function modes`_.
+* ``bbo`` -- the same pipeline as ``sampling``, but each direction is chosen
+  by a black-box optimiser (SHADE) searching for the largest gap between the
+  approximations.
+* ``batch`` -- the same pipeline, but each iteration probes a batch of up to
+  ``batch_size`` directions concurrently in a persistent worker pool. See
+  `Batch mode`_.
 
-Oracle mode and all three support-function modes (``sampling``, ``bbo``,
-``batch``) produce the same kind of output: a polytope file plus one solved
-design per iteration (per query, in batch mode's case).
+Oracle and the three support-function modes ("polytope modes") write a
+polytope file plus one solved design per query.
 
-The code lives in ``zen_garden_plugins/mga``: ``plugin.py`` (event handler
-and model interface), ``axes.py`` (exploration-axis parsing),
-``oracle_driver.py`` (pyoNearOpt ORACLE wiring), ``supf_driver.py``
-(pyoNearOpt support-function wiring for ``sampling`` and ``bbo``,
-including the bounds/initial-approximation setup batch mode also uses),
-``batch_driver.py`` (pyoNearOpt ``batch_oracle`` wiring),
-``parallel_solve.py`` (the worker pool batch mode solves directions
-through), and ``polytope_io.py`` (the polytope npz schema with its reader
-and writer).
+Code layout
+-----------
+
+The code lives in ``zen_garden_plugins/mga``:
+
+.. code-block:: text
+
+    plugin.py              entry point: Config re-export, run_mga (guards, dispatch)
+    config_schema.py       pydantic Config: the only place with defaults; all validation
+    axes.py                Axis type, config -> ordered list of axes, axis units
+    axis_evaluation.py     model-coupled axis maths (expressions, values, references)
+    near_optimal_model.py  MGA: baseline, axes, cost budget, solve + Postprocess
+    normalisation.py       scale/offset per normalisation convention
+    initialisation.py      shared first step of the polytope modes: bounds (VMM),
+                           initial inner points, initial outer box
+    artifacts.py           polytope.npz / diagnostics.csv of the polytope modes
+    modes/weights.py       weights mode
+    modes/oracle.py        oracle mode: projection model, ORACLE loop, certificate
+    modes/support_function.py  sampling, bbo and batch modes
+    modes/worker_pool.py   batch-mode worker pool and its pickling patches
+    polytope_io.py         polytope npz schema, reader and writer (numpy only)
+
+Dependencies run one way: ``plugin`` builds the ``MGA``
+(``near_optimal_model`` -> ``axis_evaluation`` -> ``axes``) and hands it to
+a mode; the modes use ``initialisation`` and ``artifacts``.
+``polytope_io`` imports nothing from the plugin, so analysis scripts can use
+it without ZEN-garden.
 
 Requirements
 ------------
@@ -62,375 +69,332 @@ Requirements
 * ZEN-garden v3 (3.1.1 or later) with the ``after_solve`` event, which is
   not yet in a released version (use the ``feature/mga`` branch). The event
   fires at the end of ``OptimizationStep.write_results`` and hands the
-  plugin the solved ``OptimizationStep`` as ``optimization_step``.
-* Oracle, sampling, bbo and batch modes all need **pyoNearOpt** (E. Turan,
-  ETH Zurich) -- not public yet; request access and install it manually,
-  e.g. ``pip install -e path/to/pyoNearOpt``. Weights mode works without
-  pyoNearOpt.
-* Oracle mode additionally needs **Gurobi** and a license -- its max-min
-  solver is hardcoded to Gurobi. See the compatibility note in
-  ``oracle_driver.py``.
-* Bbo mode additionally needs pyoNearOpt's optional ``bbo`` extra
-  (``pip install "pyoNearOpt[bbo]"``, which pulls in ``pypop7``) for its
-  black-box optimiser. **Batch mode always needs this extra too**, even
-  with ``strategy_mode: "sampling"``: pyoNearOpt's ``batch_ORACLE`` module
-  imports ``pypop7``'s ``SHADE`` unconditionally at module level.
-* Sampling and bbo modes need no dedicated solver license: the only
-  ZEN-garden-model solve per iteration is a plain LP, using whatever solver
-  the run is already configured with. Batch mode is the same, but solves
-  ``n_workers`` of them concurrently, so a solver with a per-seat/floating
-  license (e.g. Gurobi) needs enough concurrent tokens available -- ETH's
-  Euler cluster grants a *floating* academic Gurobi license (a shared pool
-  of tokens across all HPC users), not a personal single-use license, so
-  ``n_workers > 1`` is fine there but may not be on a laptop with a
-  personal license.
-* Batch mode parallelizes solves via OS-level ``multiprocessing``: the
-  default ``"fork"`` start method (used for every solver except Gurobi)
-  gives each worker a private copy of the already-built model at zero
-  serialization cost; only available on Linux/macOS (not Windows), so
-  Euler is the native case. With ``solver.name: "gurobi"``, batch mode
-  automatically switches to ``"spawn"`` instead, to sidestep gurobipy's
-  fork-safety caveats.
+  plugin the solved ``OptimizationStep``.
+* The polytope modes need **pyoNearOpt** (E. Turan, ETH Zurich), which is not
+  public yet; install it manually, e.g. ``pip install -e path/to/pyoNearOpt``.
+  Weights mode works without it.
+* Oracle mode additionally needs **Gurobi** and a license (see `Oracle mode`_).
+* Bbo and batch mode need pyoNearOpt's optional ``bbo`` extra
+  (``pip install "pyoNearOpt[bbo]"``, which pulls in ``pypop7``). Batch mode
+  needs it even with ``strategy_mode: "sampling"``, because pyoNearOpt's
+  ``batch_ORACLE`` imports ``SHADE`` at module level.
+* Sampling, bbo and batch mode solve plain LPs with the run's own solver.
+  Batch mode solves ``n_workers`` of them at once, so a solver with
+  per-seat licenses needs enough concurrent tokens (Euler's floating
+  academic Gurobi license has them; a personal single-use license may not).
 
 Configuration
 -------------
 
-Activate the plugin by adding an ``mga`` entry to the ``plugins`` block of
-your ``config.yaml``. ZEN-garden v3 validates the block against the plugin's
-pydantic ``Config`` schema (``config_schema.py``) when it loads the plugin:
-unknown keys anywhere in the block are rejected, and values must have the
-documented type (strict validation, e.g. ``"0.1"`` is not a float). All
-defaults below are filled in at load time.
+Activate the plugin with an ``mga`` entry in the ``plugins`` block of
+``config.yaml``. ZEN-garden validates the block against the pydantic
+``Config`` when it loads the plugin: unknown keys are rejected, values must
+have the documented type (strict validation, e.g. ``"0.1"`` is not a float),
+and all defaults are filled in.
 
 ``epsilon`` (float, default 0.1)
-    Near-optimality slack, e.g. 0.1 for a 10 % cost budget.
+    Near-optimality slack, e.g. 0.1 for a 10 % cost budget. Must be positive.
 
 ``mode`` (str, default ``"weights"``)
     ``"weights"``, ``"oracle"``, ``"sampling"``, ``"bbo"`` or ``"batch"``.
 
-``normalisation`` (str, default ``"relative"``, oracle/sampling/bbo/batch modes)
-    ``"relative"`` scales each design axis by its near-optimal maximum, so it
-    reaches 1 there; this is what makes a single scalar tolerance meaningful
-    across axes with different physical units. ``"minmax"`` instead maps
-    each design axis's own near-optimal ``[min, max]`` onto ``[0, 1]``
-    (scale = upper - lower, offset = lower) -- unlike ``"relative"``, this
-    uses the full ``[0, 1]`` range even when an axis's near-optimal minimum
-    sits well above 0, so a fixed exploration tolerance represents the same
-    fraction of *that axis's own* near-optimal spread for every axis, not
-    just of its distance from the origin. ``"units"`` instead reports
-    design axes in their own physical units (scale = 1, offset = 0) -- only
-    sensible when the selected axes already share comparable units and
-    magnitudes, which is the user's judgement to make, not the plugin's.
-    ``"share"`` reports each design axis as its fraction of a fixed
-    reference total (scale = that total, offset = 0), evaluated once on the
-    baseline design z*, rounded to one significant figure (e.g. ``12.3e6``
-    becomes ``10e6``, ``18e12`` becomes ``20e12``), rather than recomputed
-    for each explored point: every ``node_capex`` and ``node_capex_cumulative``
-    axis in a run shares one identical total -- summed over every node and
-    the full model horizon, regardless of a given ``node_capex_cumulative``
-    axis's own ``until_year`` -- while each ``node_capex_by_technology`` or
-    ``node_capex_cumulative_tech`` axis instead divides by its own
-    technology group's total (also summed over every node and the full
-    horizon, regardless of the latter's own ``until_year``). The rounded
-    total actually used, and the raw baseline value it was rounded from, are
-    both recorded per axis in the run's ``axis_meta_json`` (as
-    ``share_reference_total`` / ``share_reference_total_raw``), and logged
-    once per distinct total when the run starts. It is only supported for
-    capex axes (``node_capex``, ``node_capex_cumulative``,
-    ``node_capex_by_technology``, ``node_capex_cumulative_tech``) -- a
-    config error is raised if ``"share"`` is selected alongside any
-    ``technologies`` or ``carrier_imports`` axes. The cost axis is always
-    normalised relative to the near-optimality budget regardless of this
-    setting.
-
-    Because the ``"share"`` reference total is shared across every axis in
-    its group rather than being each axis's own near-optimal range (unlike
-    ``"minmax"``), a fixed ``tolerance_explore`` (see ``sampling``/``bbo``/
-    ``batch`` below) is satisfied sooner for an axis whose near-optimal
-    range is a *small* fraction of that shared total, and later for an axis
-    whose range is a *large* fraction of it -- so the sampling/bbo/batch
-    convergence check naturally spends more iterations resolving detail in
-    larger/more decision-relevant regions or technology groups, and
-    comparatively little on small ones. This is a deliberate property of
-    ``"share"`` normalisation, useful precisely when fine-grained coverage
-    of the smallest regions/groups doesn't matter as much as the largest
-    ones -- it is not a convergence-check defect, and ``tolerance_explore``
-    should not be "corrected" to compensate for it. Use ``"minmax"`` instead
-    whenever every axis should be explored to the same *relative* depth
-    regardless of its size.
-
-    ``"per_axes"`` also reports each design axis as a fraction of a fixed
-    reference (scale = that reference, offset = 0), but -- unlike
-    ``"share"``, where one baseline total is shared by a whole group of
-    axes -- each axis *kind* supplies its own, physically-appropriate
-    reference: ``node_capex_cumulative`` axes divide by a fixed configurable
-    constant, ``per_axes_capex_reference`` (see below); ``node_capacity_ratio``
-    and ``node_output_ratio`` axes are already a fraction of their own
-    baseline denominator (see those axis kinds below), so their reference is
-    simply 1; ``node_carbon_emissions_cumulative``
-    axes divide by the model's own ``carbon_emissions_budget`` parameter.
-    The cost axis is unaffected, as always. It is only supported for these
-    four axis kinds (plus the cost axis) -- a config error is raised if
-    ``"per_axes"`` is selected alongside ``technologies``, ``carrier_imports``,
-    ``node_capex``, ``node_capex_by_technology`` or ``node_capex_cumulative_tech``
-    axes, since none of those has a defined ``per_axes`` reference. The
-    reference actually used is recorded per axis in ``axis_meta_json`` as
-    ``per_axes_reference``, and logged once per distinct axis kind when the
-    run starts.
-
-    Oracle mode
-    requires the default ``"relative"``: its max-min MILP relies on
-    ``big_M``/``t_max`` dominating axis magnitudes and a cut-validity guard
-    sized for O(1) normalised coordinates anchored at offset=0, both of
-    which assume relative normalisation; ``"units"``/``"minmax"``/``"share"``/
-    ``"per_axes"`` raise a config error there. This key has no effect in
-    ``"weights"`` mode, which never normalises axes -- weights are applied
-    in each axis's own physical units.
+``normalisation`` (str, default ``"minmax"``)
+    ``"relative"``, ``"minmax"``, ``"share"`` or ``"per_axes"``; see
+    `Normalisation`_. Oracle mode requires ``"relative"``, which must be set
+    explicitly because it is not the default. No effect in weights mode.
 
 ``per_axes_capex_reference`` (float, default ``15e12``)
-    The fixed reference total (in the model's capex unit) that
-    ``node_capex_cumulative`` axes divide by under ``normalisation="per_axes"``.
-    Unused otherwise. This is a deliberate simplification for now -- not a
-    computed "share of net present cost" reference -- so pick a round number
-    that puts your study's capex axes in a sensible range.
+    The reference (in the model's capex unit) that ``node_capex_cumulative``
+    axes divide by under ``normalisation: per_axes``. A deliberate
+    simplification: pick a round number that puts the capex axes in a
+    sensible range.
 
-``iterations`` (list of dicts, weights mode)
-    One ``{"weights": {axis_name: weight}}`` dict per iteration. Each key
-    must be the name of an axis defined in the ``axes`` config block below
-    (a technology, a lumped technology group, a carrier-import axis, a
-    node-capex axis, or the cost axis) -- axes without a listed weight
-    contribute nothing; an unknown axis name raises an error listing the
-    available names. The objective for that iteration is
-    ``sum_i w_i * axis_expression(axis_i)`` in each axis's own physical
-    units (e.g. GW for a technology axis, currency for a node-capex axis).
+``iterations`` (list, weights mode)
+    One ``{"weights": {axis_name: weight}}`` entry per iteration. Keys must
+    be axis names from the ``axes`` block; axes without a weight contribute
+    nothing, and an unknown name raises an error listing the valid names.
+    Weights apply to the axes in their own physical units.
 
 ``axes`` (dict, all modes)
-    * ``technologies``: technology axes; entries are technology names or
-      single-key dicts ``{group_name: [members]}`` for lumped axes.
-    * ``carrier_imports``: carrier-import axes, same entry format.
-    * ``node_capex``: per-node annualised-capex axes, summed over all model
-      years; entries are node names or single-key dicts
-      ``{group_name: [members]}`` for lumped node groups (e.g. a region made
-      of several nodes). Capex only -- not opex, carrier-trade or carbon
-      cost (carbon cost has no spatial dimension in ZEN-garden at all).
-      Transport technologies are excluded, since their capex is attributed
-      to edges, not nodes.
-    * ``node_capex_cumulative`` (dict): per-node annualised-capex axes,
-      restricted to every model year up to and including a target calendar
-      year. ``nodes`` uses the same name-or-lumped-dict format as
-      ``node_capex``; ``until_years`` is a list of target years. One axis is
-      created per (node/group, until_year) combination, named
-      ``<node_or_group>_until_<until_year>``. In oracle/sampling/bbo/batch
-      modes, every consecutive pair of these axes sharing a node/group is
-      automatically constrained to be non-decreasing in the outer polytope
-      approximation (``MGA.build_initial_outer_approximation``): since
-      ``cost_capex_yearly`` is non-negative and each axis's year window
-      nests inside the next, this holds for every feasible design, so it
-      only tightens the approximation and never excludes a true
-      near-optimal point.
-    * ``node_capex_by_technology`` (dict): per-node annualised-capex axes,
-      restricted to a named technology group (e.g. only renewables), summed
-      over all model years. ``nodes`` uses the same name-or-lumped-dict
-      format as ``node_capex``; ``technology_groups`` uses the same format
-      over technology names (e.g.
-      ``[{"renewables": ["pv", "wind", "hydro"]}]``). One axis is created
-      per (node/group, technology-group) combination, named
-      ``<node_or_group>_<technology_group_name>``.
-    * ``node_capex_cumulative_tech`` (dict): per-node annualised-capex axes,
-      restricted to both a target calendar year and a named technology group
-      at once -- the combination of ``node_capex_cumulative`` and
-      ``node_capex_by_technology``. ``nodes``/``technology_groups`` use the
-      same formats as ``node_capex_by_technology``; ``until_years`` the same
-      format as ``node_capex_cumulative``. One axis is created per
-      (node/group, technology-group, until_year) combination, named
-      ``<node_or_group>_<technology_group_name>_until_<until_year>``,
-      iterated nodes-major, technology-groups-middle, until-years-minor. In
-      oracle/sampling/bbo/batch modes, every consecutive pair of these axes
-      sharing *both* a node/group and a technology group is constrained to
-      be non-decreasing (same monotonicity mechanism as
-      ``node_capex_cumulative``, but scoped per (node/group,
-      technology-group) pair -- axes from different technology groups are
-      never compared, since their capex is not a nested cumulative window
-      of the same quantity).
-    * ``node_capacity_ratio`` (dict): per-node axes of one named technology
-      group's installed *capacity* (not capacity addition) as a fraction of
-      another named technology group's, at one snapshot calendar year --
-      e.g. "BEV + HDT-BEV capacity / all road-transport-technology capacity"
-      to track direct electrification. ``nodes`` uses the same
-      name-or-lumped-dict format as ``node_capex``; ``years`` is a list of
-      target calendar years (a snapshot, unlike ``until_years`` -- capacity
-      is already a stock variable at that year, no cumulation needed);
-      ``ratio_groups`` is a list of single-key dicts
-      ``{group_name: {"numerator": [...], "denominator": [...]}}``, both
-      lists in the same technology-name/lump format as
-      ``node_capex_by_technology``'s ``technology_groups`` (a numerator
-      technology appearing in its own denominator, e.g. BEV in both, is the
-      expected, normal case and is allowed). One axis is created per
-      (node/group, ratio-group, year) combination, named
-      ``<node_or_group>_<ratio_group_name>_<year>``, iterated nodes-major,
-      ratio-groups-middle, years-minor. Both the numerator and denominator
-      technology groups of one ratio-group must resolve to the same
-      capacity type (power or energy) -- a config error is raised otherwise.
-
-      **The denominator is evaluated once, on the cost-optimal baseline
-      design, and held fixed** for every explored point of that axis --
-      *not* recomputed live. This is because both the numerator and
-      denominator are sums of decision variables, so a live ratio of the
-      two would be a genuine nonlinear term and could not serve as an LP
-      objective/projection term the way every other axis does (needed for
-      the VMM bound LPs, the weights-mode objective, oracle's projection
-      equality, and sampling/bbo/batch's support-function objective).
-      Freezing the denominator at baseline is a good proxy whenever its
-      technology group's aggregate capacity is largely demand-driven and
-      not expected to move much across near-optimal designs (e.g. total
-      road-transport or heating technology capacity, driven by exogenous
-      mileage/heat demand) -- it is a deliberate approximation, not an
-      oversight, and both the denominator technology group and the
-      baseline value it was frozen at are recorded per axis in
-      ``axis_meta_json`` (as ``denominator_technologies`` /
-      ``capacity_ratio_denominator_baseline``) for traceability. Unlike
-      every cumulative axis kind, these axes are **not** constrained to be
-      monotonic across years -- a capacity share can legitimately rise or
-      fall year to year.
-
-      Because the numerator is *installed* capacity, the bound LPs can
-      move it by buying capacity that is never used: the near-optimality
-      slack can pay for large amounts of idle electric capacity, so the
-      near-optimal maxima can be many times the capacity the demand
-      actually needs. Use ``node_output_ratio`` when what matters is the
-      share of energy actually delivered.
-    * ``node_output_ratio`` (dict): the same as ``node_capacity_ratio`` --
-      same ``nodes``/``years``/``ratio_groups`` config, same
-      ``<node_or_group>_<ratio_group_name>_<year>`` naming, same frozen
-      baseline denominator, no monotonicity -- but over **delivered
-      energy** instead of installed capacity: the numerator is the annual
-      ``flow_conversion_output`` of the numerator technologies at the
-      axis's node(s) and year, and the denominator is the denominator
-      technologies' annual output there on the baseline design. Idle
-      capacity therefore does not move the axis, and since output is bound
-      by demand the axis stays roughly within [0, 1]. Every member must be
-      a conversion technology (only those have ``flow_conversion_output``),
-      and all members of one ratio group must produce outputs in one unit --
-      e.g. passenger cars (``passenger_mileage``) and trucks
-      (``truck_mileage``) must go into separate groups; a config error is
-      raised otherwise (checked only when ZEN-garden's unit tracking is
-      on). The frozen denominator is recorded per axis in
-      ``axis_meta_json`` as ``output_ratio_denominator_baseline``.
-    * ``node_carbon_emissions_cumulative`` (dict): per-node cumulative
-      carbon-emissions axes, restricted to every model year up to and
-      including a target calendar year -- structurally identical to
-      ``node_capex_cumulative`` (same ``nodes``/``until_years`` shape, same
-      ``<node_or_group>_until_<until_year>`` naming, same monotonicity
-      behaviour in oracle/sampling/bbo/batch modes), but summing the
-      model's ``carbon_emissions_technology`` instead of
-      ``cost_capex_yearly``. Interval-expanded across sampled years the
-      same way the capex axes are, but **not discounted** -- carbon
-      emissions aren't a monetary quantity. Since the naming scheme is
-      identical to ``node_capex_cumulative``'s, reusing the same node/group
-      name in both blocks with an overlapping ``until_year`` is rejected as
-      a duplicate axis name; use distinct node/group names across the two
-      blocks (e.g. ``"DE"`` vs. ``"DE_co2"``) if you need both.
-    * ``include_cost`` (bool, default false): add the total-cost axis.
+    The exploration axes, see `Axes`_.
 
 ``oracle`` (dict, oracle mode)
-    * ``tolerance`` (float, required): convergence tolerance in normalised
-      coordinates.
+    * ``tolerance`` (float, required): convergence tolerance (max-min
+      distance in normalised coordinates).
     * ``max_iterations`` (int, default 200).
-    * ``initial_bounds``: ``"vmm"`` (default; two LPs per design axis yield
-      certified bounds plus extreme designs) or a dict
-      ``{axis: [lower, upper]}`` covering every design axis.
-    * ``max_min`` (dict) -- settings of the max-min distance problem that
-      picks each trial point and reports the metric: ``formulation``
-      (``"kkt_milp"`` only -- ``"dual_bilinear"`` is not implemented and
-      raises error), ``use_bigM`` (default true), ``big_M`` (default 1e8),
-      ``t_max``, ``solver_options`` (Gurobi options for the max-min
-      solves), and ``certificate_time_limit`` (seconds, 0 = off; one long
-      max-min solve after a non-converged loop to tighten the stored
-      metric).
+    * ``initial_bounds``: ``"vmm"`` (default; two LPs per design axis give
+      certified bounds plus extreme designs) or ``{axis: [lower, upper]}``
+      covering every design axis.
+    * ``max_min`` (dict), the max-min problem that picks each trial point:
+      ``formulation`` (only ``"kkt_milp"``), ``use_bigM`` (default true),
+      ``big_M`` (default 1e8), ``t_max`` (default unset),
+      ``solver_options`` (Gurobi options), ``certificate_time_limit``
+      (seconds, default 0 = off).
 
 ``sampling`` (dict, sampling mode)
-    * ``tolerance_prob`` (float, required): the exploration stops once the
-      lower confidence bound on the fraction of well-approximated
-      directions exceeds this value.
+    * ``tolerance_prob`` (float, required): stop once the lower confidence
+      bound on the fraction of well-approximated directions exceeds it.
     * ``max_iterations`` (int, default 200).
-    * ``initial_bounds``: same as oracle mode's ``initial_bounds``.
-    * ``tolerance_explore`` (float, default 0.1): the support-function gap
-      below which a direction counts as well-approximated. Its meaning
-      depends on ``normalisation``: a fraction of each axis's near-optimal
-      range under ``"relative"``/``"minmax"``, a raw physical-unit gap under
-      ``"units"``, a fraction of a *shared* reference total (not each axis's
-      own range) under ``"share"`` -- see the ``"share"`` paragraph under
-      ``normalisation`` above for why this deliberately spends more
-      exploration on larger axes/regions and less on smaller ones -- and a
-      fraction of each axis kind's own ``"per_axes"`` reference under
-      ``"per_axes"``.
-    * ``n_samples`` (int, default 1000): directions sampled per iteration to
-      estimate the confidence interval.
+    * ``initial_bounds``: as for oracle mode.
+    * ``tolerance_explore`` (float, default 0.1): the support-function gap,
+      in normalised coordinates, below which a direction counts as
+      well-approximated. Its meaning depends on ``normalisation``.
+    * ``n_samples`` (int, default 1000): directions sampled per check.
     * ``alpha`` (float, default 0.05): significance level of the interval.
-    * ``method`` (str, default ``"jeffreys"``): confidence-interval method,
-      passed to ``statsmodels.stats.proportion.proportion_confint``.
+    * ``method`` (str, default ``"jeffreys"``): interval method of
+      ``statsmodels.stats.proportion.proportion_confint``.
     * ``use_bounding_box`` (bool, default false): probe the axis-aligned
-      directions first, before falling back to sampled directions.
+      directions first.
     * ``seed_rng`` (int, default unset): seed for reproducible sampling.
-    * ``track_implied_threshold`` (bool, default false): each convergence
-      check also back-calculates, from the directions just sampled, the
-      smallest ``tolerance_explore`` that would *already* satisfy
-      ``tolerance_prob`` -- i.e. how far you'd need to relax
-      ``tolerance_explore`` to call the run converged at that iteration,
-      without re-running. Adds an ``implied_threshold_for_tolerance`` column
-      to ``diagnostics.csv`` (``None``/``NaN`` on iterations where the CI
-      lower bound never reaches ``tolerance_prob`` at any sampled gap).
+    * ``track_implied_threshold`` (bool, default false): each check also
+      reports the smallest ``tolerance_explore`` that would already satisfy
+      ``tolerance_prob``, as column ``implied_threshold_for_tolerance`` of
+      ``diagnostics.csv`` (NaN where no sampled gap reaches it).
 
 ``bbo`` (dict, bbo mode)
-    * ``tolerance_prob``, ``max_iterations``, ``initial_bounds``,
-      ``tolerance_explore``, ``n_samples``, ``alpha``, ``method``,
-      ``seed_rng``, ``track_implied_threshold``: same as sampling mode's
-      keys of the same name -- they configure the shared confidence-interval
-      convergence check, not the direction search itself.
-      ``tolerance_explore``'s meaning likewise depends on the top-level
-      ``normalisation`` setting.
-    * ``use_bounding_box`` (bool, default false): probe the axis-aligned
-      directions first, before falling back to the black-box search.
-    * ``max_function_evaluations`` (int, default 2000): evaluation budget
-      of the black-box optimiser (SHADE) per restart per iteration.
-    * ``n_restarts`` (int, default 1): independent optimiser restarts per
-      iteration; the restart with the largest gap is kept.
-    * ``optimizer_options`` (dict, default unset): extra options merged
-      into the optimiser's own options dict (e.g. population size).
+    * All keys of ``sampling``; they configure the convergence check.
+    * ``max_function_evaluations`` (int, default 2000): SHADE's evaluation
+      budget per restart and iteration.
+    * ``n_restarts`` (int, default 1): optimiser restarts per iteration; the
+      largest gap is kept.
+    * ``optimizer_options`` (dict, default unset): extra SHADE options.
 
 ``batch`` (dict, batch mode)
-    * ``tolerance_prob``, ``max_iterations``, ``initial_bounds``,
-      ``tolerance_explore``, ``n_samples``, ``alpha``, ``method``,
-      ``seed_rng``, ``track_implied_threshold``: same as sampling mode's
-      keys of the same name.
-    * ``batch_size`` (int, default 4): maximum number of directions probed
-      concurrently per iteration; the actual batch may be smaller if too
-      few well-separated far directions are available.
+    * All keys of ``sampling``, but ``use_bounding_box`` defaults to true
+      (the axis-aligned directions are cycled through across iterations).
+    * ``batch_size`` (int, default 4): maximum directions per iteration.
     * ``strategy_mode`` (str, default ``"sampling"``): ``"sampling"`` or
-      ``"bbo"`` -- which method chooses each batch's one "main" direction
-      (the rest of the batch is filled by bounding-box directions, then by
-      distance-ranked random fill). Regardless of this setting, pyoNearOpt's
-      optional ``bbo`` extra must be installed (see Requirements above).
+      ``"bbo"``, the method choosing each batch's main direction; the rest
+      is filled by bounding-box and distance-ranked random directions.
     * ``convergence_mode`` (str, default ``"ci"``): ``"ci"`` stops on the
-      same confidence-interval criterion as ``sampling``/``bbo``; ``"gap"``
-      stops once the main direction's gap falls below
-      ``tolerance_explore``; ``"both"`` tracks the CI for monitoring but
-      stops only on the gap criterion.
-    * ``use_bounding_box`` (bool, default true, note the different default
-      from sampling/bbo): probe the axis-aligned directions first, cycling
-      through them across iterations, before filling the rest of each
-      batch by the configured ``strategy_mode``/random fill.
-    * ``max_function_evaluations``, ``n_restarts``: same as bbo mode's keys
-      of the same name; only used when ``strategy_mode: "bbo"``.
-    * ``bbo_enabled`` (bool, default true): if false, disables the BBO
-      main-direction search even when ``strategy_mode: "bbo"``, falling
-      back to the largest-gap sampled direction instead.
-    * ``n_workers`` (int, default the machine's CPU count): number of
-      persistent worker processes solving directions concurrently.
-      Independent of ``batch_size`` -- if ``batch_size > n_workers``,
-      workers just pick up the next queued direction as they free up.
+      confidence interval, ``"gap"`` once the main direction's gap falls
+      below ``tolerance_explore``, ``"both"`` tracks the interval but stops
+      on the gap.
+    * ``max_function_evaluations``, ``n_restarts``: as for bbo mode, used
+      with ``strategy_mode: "bbo"``.
+    * ``bbo_enabled`` (bool, default true): false falls back to the
+      largest-gap sampled direction even with ``strategy_mode: "bbo"``.
+    * ``n_workers`` (int, default the CPU count): worker processes. If
+      ``batch_size > n_workers``, workers pick up queued directions.
 
-Example (weights mode):
+Axes
+----
+
+An axis is one coordinate of the explored space. Axis lists take member
+names (one axis each) or single-key dicts ``{group_name: [members]}`` (one
+axis for the summed group). Group names must not reuse a technology, carrier
+or node name, a member may appear in only one axis of a list, and axis names
+must be unique across all blocks. The column order is: technology, carrier,
+cumulative-capex, capacity-ratio, output-ratio and cumulative-emissions
+axes, each in config order, then the cost axis.
+
+``technologies``
+    Summed ``capacity_addition`` of the members over all locations and
+    years. Storage technologies (more than one active capacity type) count
+    their energy capacity, all others their power capacity
+    (``system.set_capacity_types[0]``); lumping storage with non-storage
+    technologies is rejected because it would mix units.
+
+``carrier_imports``
+    Duration-weighted annual import ``sum tau_t * flow_import`` of the
+    member carriers.
+
+``node_capex_cumulative`` (``nodes``, ``until_years``)
+    Annualised ``cost_capex_yearly`` of the member nodes over every model
+    year up to and including ``until_year``; one axis per (node group,
+    until_year), named ``<group>_until_<year>``. Each year's capex is
+    discounted and interval-expanded exactly like ZEN-garden's
+    ``constraint_net_present_cost`` (factor
+    ``sum_{i<n} (1/(1+r))^(interval*(y-y0)+i)``, n = 1 in the last year), so
+    the axis is on the same basis as the cost axis. Capex only (no opex or
+    carbon cost); transport technologies drop out because their capex sits on
+    edges, not nodes. These axes get `Monotonicity`_ rows.
+
+``node_capacity_ratio`` (``nodes``, ``years``, ``ratio_groups``)
+    Installed ``capacity`` of a numerator technology group divided by a
+    denominator group's, at the member nodes and one snapshot model year;
+    one axis per (node group, ratio group, year), named
+    ``<group>_<ratio_group>_<year>``. ``ratio_groups`` entries are
+    ``{name: {"numerator": [...], "denominator": [...]}}``; a numerator
+    technology may also be in its own denominator. Both groups must share
+    one capacity type. The year must be a model year.
+
+    **The denominator is frozen** at its value on the cost-optimal baseline
+    and not recomputed per explored design: a ratio of two decision-variable
+    sums is nonlinear and could not be an LP objective or projection term.
+    This is a good proxy when the denominator group's total is
+    demand-driven (e.g. all road-transport capacity). Because the numerator
+    is installed capacity, the cost slack can buy idle capacity, so the
+    near-optimal maxima can be far above what demand needs; use
+    ``node_output_ratio`` for the share of delivered energy.
+
+``node_output_ratio`` (same keys)
+    As ``node_capacity_ratio``, but over the annual ``flow_conversion_output``
+    of the groups, so idle capacity does not move the axis. Members must be
+    conversion technologies, and one ratio group must have one output unit
+    (e.g. passenger and freight transport go into separate groups; checked
+    when ZEN-garden's unit tracking is on).
+
+``node_carbon_emissions_cumulative`` (``nodes``, ``until_years``)
+    Annualised ``carbon_emissions_technology`` of the member nodes up to
+    ``until_year``, interval-expanded like the capex axes but not
+    discounted. Values can be negative (negative-emission technologies such
+    as DAC), so these axes are neither clipped at 0 nor monotone. Use
+    distinct group names from ``node_capex_cumulative`` (e.g. ``DE`` and
+    ``DE_co2``), since both name their axes ``<group>_until_<year>``.
+
+``include_cost`` (bool, default false)
+    Add the total-cost axis (the model's net present cost).
+
+The frozen ratio denominators and each axis's physical unit are recorded in
+the polytope's ``axis_meta_json``.
+
+Normalisation
+-------------
+
+The polytope modes work in normalised coordinates,
+``physical = normalised * scale + offset`` per axis, so a single tolerance is
+meaningful across axes with different units. The cost axis always uses
+``scale = epsilon * C*``, ``offset = C*``: 0 is the cost optimum and 1 the
+budget. For the design axes, with near-optimal bounds ``[lower, upper]``
+from VMM or ``initial_bounds``:
+
+``relative``
+    ``scale = upper``, ``offset = 0``: each axis reaches 1 at its
+    near-optimal maximum, and its lower bound sits at ``lower/upper``. Needs
+    a positive maximum. The only convention oracle mode accepts, because its
+    max-min MILP (``big_M``, ``t_max``) and cut guard assume O(1) coordinates
+    with offset 0.
+
+``minmax`` (default)
+    ``scale = upper - lower``, ``offset = lower``: each axis spans exactly
+    ``[0, 1]``, so ``tolerance_explore`` is the same fraction of every axis's
+    own near-optimal range. Needs a positive span, but allows negative
+    values (e.g. net-negative emissions).
+
+``share`` (``node_capex_cumulative`` axes and cost only)
+    ``scale`` = a fixed reference total, ``offset = 0``: the baseline
+    capex summed over all nodes and the full horizon (ignoring each axis's
+    own ``until_year``), rounded to one significant figure (``12.3e6`` ->
+    ``1e7``). All capex axes of a run share this total. Because the
+    reference is shared instead of each axis's own range, a fixed
+    ``tolerance_explore`` is met sooner for axes whose range is a small part
+    of the total: exploration deliberately concentrates on the larger
+    regions. Use ``minmax`` to explore every axis to the same relative
+    depth. The rounded and the raw total are stored per axis as
+    ``share_reference_total`` and ``share_reference_total_raw``.
+
+``per_axes`` (capex-cumulative, ratio, emissions and cost axes)
+    ``scale`` = a reference per axis kind, ``offset = 0``:
+    ``per_axes_capex_reference`` for ``node_capex_cumulative``, 1 for the
+    ratio axes (already fractions), and the model's
+    ``carbon_emissions_budget`` for ``node_carbon_emissions_cumulative``.
+    Stored per axis as ``per_axes_reference``.
+
+``share`` and ``per_axes`` reject ``technologies`` and ``carrier_imports``
+axes, which have no defined reference.
+
+Monotonicity
+------------
+
+``cost_capex_yearly`` is non-negative and each ``node_capex_cumulative``
+window nests inside the next, so ``z(group, until_year_1) <=
+z(group, until_year_2)`` holds for every feasible design when
+``until_year_1 < until_year_2``. The initial outer approximation therefore
+gets one such row per consecutive pair of a node group's axes: a free
+tightening that never excludes a near-optimal design. Emissions axes get no
+such rows, since negative-emission technologies can make cumulative
+emissions fall as later years are added.
+
+Initialisation
+--------------
+
+All polytope modes start the same way (``initialisation.py``):
+
+1. **Bounds.** With ``initial_bounds: vmm``, two LPs per design axis drive
+   it to its near-optimal minimum and maximum; each must be proven optimal.
+   Minima of non-negative axes are clipped at 0 (solver round-off).
+2. **Normalisation** from the bounds (see `Normalisation`_).
+3. **Initial inner points:** the baseline z* and every VMM extreme design.
+4. **Initial outer box:** the bounds plus the monotonicity rows, mapped to
+   normalised coordinates and scaled to unit row length (pyoNearOpt's
+   convention for cuts). z* must lie inside.
+
+Oracle mode
+-----------
+
+``modes/oracle.py`` connects pyoNearOpt's ORACLE to the ZEN-garden model:
+
+1. Initialise (above).
+2. pyoNearOpt solves the max-min problem over the two approximations for the
+   next trial point (Gurobi).
+3. ``OracleProjection.find_nearest_point`` minimises the normalised
+   L-infinity distance ``t`` from the trial point to the near-optimal space
+   (variables ``mga_oracle_delta`` and ``mga_oracle_t``, one ZEN-garden
+   solve). The duals of the projection equalities, times ``scale``, give the
+   cut normal.
+4. pyoNearOpt adds the point to the inner hull and the cut to the outer
+   approximation.
+5. After the loop, optionally one long max-min solve on the final geometry
+   (``certificate_time_limit``) tightens the stored metric; it is appended
+   as an extra diagnostics row.
+
+Robustness: inexact duals (e.g. barrier without crossover) can give a cut
+that would remove a known near-optimal point. Violations above ``1e-4``
+relax the cut offset outward to the farthest known inner point, which is
+always valid. A failed projection solve is retried once; a second failure
+returns the previous inner point with distance 0, which stops ORACLE so the
+artifacts are still written.
+
+pyoNearOpt compatibility: the published package provides only the
+``kkt_milp`` formulation. ``use_bigM`` defaults to true because only the
+big-M encoding is sound there: with SOS1 the reported metric is the max-min
+incumbent, not a valid upper bound. The solver is Gurobi because the max-min
+model needs SOS1 constraints or global nonconvex solving and the certificate
+reads Gurobi's dual bound.
+
+Support-function modes
+----------------------
+
+``modes/support_function.py`` runs sampling, bbo and batch mode. Each query
+maximises ``d . z`` for a normalised direction ``d`` (``solve_direction``)
+and returns the point and its support value; pyoNearOpt turns them into a
+new inner point and cut. pyoNearOpt checks convergence *before* each query,
+so for sampling and bbo the check is repeated once on the final
+approximation to include the last query. ``batch_oracle`` has no such
+re-check, so batch mode reads its last recorded history entry.
+
+Each ``diagnostics.csv`` row carries ``wall_time_seconds``: the elapsed time
+of that iteration's support-function call (sequential modes) or of the whole
+batch (batch mode), measured around the call itself. It is stored with the
+run's own artifacts rather than derived from ZEN-garden's per-solve
+``benchmarking.json``, which only times each solver call and is written
+per solve folder.
+
+Batch mode
+----------
+
+``modes/worker_pool.py`` starts ``n_workers`` processes once, each holding a
+copy of the fully set-up ``MGA``; each direction of a batch is solved by one
+worker and post-processed to ``<model>_iter<b>_<j>``. A worker's exception
+aborts the whole batch.
+
+Workers are forked (no copying cost; Linux/macOS only). With Gurobi they are
+spawned instead, because gurobipy is not fork-safe, so ``MGA`` is pickled
+once per worker. Three patches, applied when the module is imported, make
+that possible without changing ZEN-garden: ``UnitConverter`` drops its pint
+registry and rebuilds it from its folder after unpickling; ``linopy.Model``
+drops the live solver handle (each worker's first solve creates its own);
+``ParameterRegistry`` gets a class-level ``__setstate__`` so unpickling does
+not recurse through its ``__getattr__``. A sentinel at the front of the
+worker arguments installs ZEN-garden's unit registry as pint's application
+registry before any ``pint.Quantity`` is unpickled. A warm-up task starts
+all workers before the first timed batch.
+
+Examples
+--------
+
+Weights mode:
 
 .. code-block:: yaml
 
@@ -452,7 +416,7 @@ Example (weights mode):
             hydro_lump: 1.0
             DE_until_2030: 0.5
 
-Example (oracle mode):
+Oracle mode:
 
 .. code-block:: yaml
 
@@ -460,28 +424,13 @@ Example (oracle mode):
       mga:
         mode: oracle
         epsilon: 0.1
+        normalisation: relative
         axes:
-          technologies:
-          - nuclear
-          - hydro_lump: [reservoir_hydro, run-of-river_hydro]
+          technologies: [nuclear]
           carrier_imports: [biomass]
-          node_capex:
-          - DE
-          - CH
-          - benelux: [BE, NL, LU]
           node_capex_cumulative:
-            nodes: [DE, CH]
+            nodes: [DE, CH, {benelux: [BE, NL, LU]}]
             until_years: [2030, 2040, 2050]
-          node_capex_by_technology:
-            nodes: [DE, CH]
-            technology_groups:
-            - renewables: [pv, wind, hydro]
-          node_capex_cumulative_tech:
-            nodes: [DE, CH]
-            until_years: [2030, 2040, 2050]
-            technology_groups:
-            - renewables: [pv, wind, hydro]
-            - nuclear
           include_cost: true
         oracle:
           tolerance: 0.1
@@ -489,97 +438,7 @@ Example (oracle mode):
             solver_options:
               TimeLimit: 120
 
-Example (bbo mode, ``"per_axes"`` normalisation):
-
-.. code-block:: yaml
-
-    plugins:
-      mga:
-        mode: bbo
-        epsilon: 0.1
-        normalisation: per_axes
-        per_axes_capex_reference: 15000000000000.0
-        axes:
-          node_capex_cumulative:
-            nodes: [north, west, south, east]
-            until_years: [2030, 2040, 2050]
-          node_capacity_ratio:
-            nodes: [north, west, south, east]
-            years: [2030, 2040, 2050]
-            ratio_groups:
-            - road_electrification:
-                numerator: [BEV, HDT-BEV]
-                denominator: [BEV, HDT-BEV, ICE_car, ICE_truck]
-            - heating_electrification:
-                numerator: [e_boiler, heat_pump]
-                denominator: [e_boiler, heat_pump, gas_boiler, oil_boiler]
-          node_carbon_emissions_cumulative:
-            nodes: [north, west, south, east]
-            until_years: [2030, 2040, 2050]
-          include_cost: true
-        bbo:
-          tolerance_prob: 0.9
-
-Example (sampling mode):
-
-.. code-block:: yaml
-
-    plugins:
-      mga:
-        mode: sampling
-        epsilon: 0.1
-        axes:
-          technologies:
-          - nuclear
-          - hydro_lump: [reservoir_hydro, run-of-river_hydro]
-          carrier_imports: [biomass]
-          node_capex:
-          - DE
-          - CH
-          - benelux: [BE, NL, LU]
-          node_capex_cumulative:
-            nodes: [DE, CH]
-            until_years: [2030, 2040, 2050]
-          node_capex_by_technology:
-            nodes: [DE, CH]
-            technology_groups:
-            - renewables: [pv, wind, hydro]
-          include_cost: true
-        sampling:
-          tolerance_prob: 0.9
-          max_iterations: 200
-
-Example (bbo mode):
-
-.. code-block:: yaml
-
-    plugins:
-      mga:
-        mode: bbo
-        epsilon: 0.1
-        axes:
-          technologies:
-          - nuclear
-          - hydro_lump: [reservoir_hydro, run-of-river_hydro]
-          carrier_imports: [biomass]
-          node_capex:
-          - DE
-          - CH
-          - benelux: [BE, NL, LU]
-          node_capex_cumulative:
-            nodes: [DE, CH]
-            until_years: [2030, 2040, 2050]
-          node_capex_by_technology:
-            nodes: [DE, CH]
-            technology_groups:
-            - renewables: [pv, wind, hydro]
-          include_cost: true
-        bbo:
-          tolerance_prob: 0.9
-          max_iterations: 200
-          max_function_evaluations: 2000
-
-Example (batch mode):
+Batch mode with ``per_axes`` normalisation:
 
 .. code-block:: yaml
 
@@ -587,29 +446,31 @@ Example (batch mode):
       mga:
         mode: batch
         epsilon: 0.1
+        normalisation: per_axes
+        per_axes_capex_reference: 15000000000000.0
         axes:
-          technologies:
-          - nuclear
-          - hydro_lump: [reservoir_hydro, run-of-river_hydro]
-          carrier_imports: [biomass]
-          node_capex:
-          - DE
-          - CH
-          - benelux: [BE, NL, LU]
           node_capex_cumulative:
-            nodes: [DE, CH]
+            nodes: [north: [DK, 'NO', SE], south: [ES, IT, PT]]
             until_years: [2030, 2040, 2050]
-          node_capex_by_technology:
-            nodes: [DE, CH]
-            technology_groups:
-            - renewables: [pv, wind, hydro]
+          node_output_ratio:
+            nodes: [north: [DK, 'NO', SE], south: [ES, IT, PT]]
+            years: [2030, 2038, 2050]
+            ratio_groups:
+            - heating_electrification:
+                numerator: [electrode_boiler, heat_pump]
+                denominator: [electrode_boiler, heat_pump, natural_gas_boiler, oil_boiler]
+          node_carbon_emissions_cumulative:
+            nodes: [north_co2: [DK, 'NO', SE], south_co2: [ES, IT, PT]]
+            until_years: [2030, 2040, 2050]
           include_cost: true
         batch:
           tolerance_prob: 0.9
-          max_iterations: 200
           batch_size: 8
-          strategy_mode: sampling
+          strategy_mode: bbo
           n_workers: 8
+
+Sampling and bbo mode take the same ``axes`` block with a ``sampling`` or
+``bbo`` block holding at least ``tolerance_prob``.
 
 Outputs
 -------
@@ -619,59 +480,29 @@ baseline (``<model>`` is the dataset name):
 
 .. code-block:: text
 
-    <model>/                            baseline (written by ZEN-garden itself)
-    <model>_vmm_max_<axis>/            VMM maximum LP, one per design axis
-    <model>_vmm_min_<axis>/            VMM minimum LP, one per design axis
-    <model>_mga_iter_<i>/              weights mode: one folder per iteration
-    <model>_oracle_iter_<n>/           oracle mode: one folder per projection
-                                       solve (numbering matches diagnostics.csv)
-    <model>_oracle_summary/             polytope.npz + diagnostics.csv
-    <model>_supf_iter_<n>/             sampling/bbo mode: one folder per
-                                       support-function solve (numbering
-                                       matches diagnostics.csv). The
-                                       callback is shared by both modes, so
-                                       the folder name is not mode-prefixed.
-    <model>_iter<b>_<j>/               batch mode: one folder per queried
-                                       direction (batch b, job j within that
-                                       batch), written by whichever worker
-                                       process solved it.
-    <model>_sampling_summary/           polytope.npz + diagnostics.csv (sampling mode)
-    <model>_bbo_summary/                polytope.npz + diagnostics.csv (bbo mode)
-    <model>_batch_summary/              polytope.npz + diagnostics.csv (batch mode)
+    <model>/                     baseline (written by ZEN-garden itself)
+    <model>_vmm_max_<axis>/      VMM maximum LP, one per design axis
+    <model>_vmm_min_<axis>/      VMM minimum LP, one per design axis
+    <model>_mga_iter_<i>/        weights mode, one per iteration
+    <model>_oracle_iter_<n>/     oracle mode, one per projection
+    <model>_supf_iter_<n>/       sampling/bbo mode, one per query
+    <model>_iter<b>_<j>/         batch mode, job j of batch b
+    <model>_<mode>_summary/      polytope.npz + diagnostics.csv (polytope modes)
 
 ``polytope.npz`` holds the outer approximation, the certified inner points,
-the normalisation, and per-axis metadata; the schema is documented in and
-read back by ``polytope_io.py`` (``load_polytope``). Its ``convergence_threshold``
-and ``final_gap`` fields are shared across modes: ``convergence_threshold`` is
-the configured target (``oracle.tolerance``, a max-min distance bound, or
-``sampling``/``bbo``/``batch``'s ``tolerance_prob``, a confidence-interval
-target), and ``final_gap`` is the worst-case gap between the outer and inner
-approximation at the end of the run (a certified max-min distance for
-oracle mode, the largest observed support-function gap for
-sampling/bbo/batch mode). ``diagnostics.csv`` is the exploration method's
-per-iteration record (pyoNearOpt's for oracle mode; sampling/bbo mode's
-records each iteration's queried point, cut and confidence-interval
-progress; batch mode's records each iteration's *whole batch* of queried
-directions, points, cuts and progress in one row, since one call to the
-worker pool answers a full batch at once). In scenario runs, each scenario
-writes its own subfolder inside the summary folder.
-
-Setting ``track_implied_threshold: true`` on ``sampling``/``bbo``/``batch``
-adds an ``implied_threshold_for_tolerance`` column to ``diagnostics.csv``,
-computed during exploration from each check's already-sampled directions
-(no extra solves) -- see the ``sampling`` option above.
-
-Batch mode's convergence/gap fields carry one caveat beyond the others:
-``batch_oracle`` (unlike ``sampling``/``bbo``'s harness) has no public
-re-check method, so ``converged``/``final_gap`` are read from its last
-recorded history entry rather than a fresh check against the final
-approximation -- accepted, documented staleness, same as the pre-refactor
-check the other two modes used to have.
+the normalisation and per-axis metadata; its schema is documented in
+``polytope_io.py`` and read with ``load_polytope``. ``convergence_threshold``
+is the configured target (``oracle.tolerance`` or ``tolerance_prob``) and
+``final_gap`` the worst-case gap between the approximations at the end (a
+certified max-min distance for oracle, the largest observed support-function
+gap otherwise). ``diagnostics.csv`` is the per-iteration record of the
+exploration method (one row per whole batch in batch mode). In scenario
+runs, each scenario writes its own subfolder in the summary folder.
 
 Limitations
 -----------
 
-* Rolling-horizon runs, scaled runs (``solver.use_scaling``), and non-cost
-  objectives are rejected; see the module docstring of ``plugin.py``.
-* Config errors are only reported after the baseline solve (``after_solve``
-  is the only event the plugin can use).
+* Rolling-horizon runs (``after_solve`` would fire once per horizon step),
+  scaled runs (``solver.use_scaling``) and non-cost objectives are rejected.
+* Config values are validated when ZEN-garden loads the plugin; axis names
+  are checked against the model only after the baseline solve.

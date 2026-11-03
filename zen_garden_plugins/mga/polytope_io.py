@@ -1,20 +1,10 @@
-"""Reader/writer and de-normalisation helpers for MGA ORACLE polytope files.
+"""Reader/writer and de-normalisation helpers for MGA polytope files.
 
-This module is the single owner of the polytope npz schema written by the MGA
-plugin and read by its consumers. It is deliberately dependency-light (numpy +
-stdlib only) and side-effect-free: importing it does NOT import the MGA plugin
-and therefore registers no event handlers.
-
-Every exploratory variable is an axis -- a technology-capacity group, a
-carrier-import group, a per-node (or per-node-lump) capex group, a per-node
-capex group restricted to all years up to a target calendar year, a per-node
-capex group restricted to a named technology group, a per-node capex group
-restricted to both a target calendar year and a named technology group at
-once, a per-node ratio of two named technology groups' installed capacity at
-a target calendar year, a per-node cumulative carbon-emissions group
-restricted to all years up to a target calendar year, or the total cost --
-so all per-axis arrays share one length and one order, matching the
-polytope's columns.
+This module owns the polytope npz schema written by the polytope modes and
+read by analysis scripts. It depends on numpy and the standard library only
+and imports nothing from the plugin, so importing it registers no event
+handlers. All per-axis arrays share one length and the column order of the
+polytope.
 
 Schema:
 
@@ -22,14 +12,7 @@ Schema:
     b               (n_rows,)
     X               (n_points, n_axes)   certified near-optimal points
     name_list       (n_axes,) str        axis names, in column order
-    kinds           (n_axes,) str        tech_capacity | carrier_import |
-                                         node_capex | node_capex_cumulative |
-                                         node_capex_tech |
-                                         node_capex_cumulative_tech |
-                                         node_capacity_ratio |
-                                         node_output_ratio |
-                                         node_carbon_emissions_cumulative |
-                                         total_cost
+    kinds           (n_axes,) str        axis kind (constants below)
     units           (n_axes,) str        physical unit, "" when unknown
     scale           (n_axes,)            physical = normalised * scale + offset
     offset          (n_axes,)
@@ -37,65 +20,23 @@ Schema:
     z_star_phys     (n_axes,)            cost-optimal baseline point, physical
     c_star          ()                   baseline net present cost
     epsilon         ()                   near-optimality slack
-    convergence_threshold ()             the run's target value for its
-                                         convergence criterion -- a max-min
-                                         L-infinity distance bound for oracle
-                                         mode, a CI-on-fraction-of-directions
-                                         target for support-function modes
+    convergence_threshold ()             target of the run's convergence metric:
+                                         max-min distance (oracle) or
+                                         tolerance_prob (support-function modes)
     converged       () bool
-    final_gap       ()                  worst-case gap between the outer and
-                                         inner approximation at the end of the
-                                         run -- a certified max-min distance
-                                         for oracle mode, the largest observed
-                                         support-function gap for
-                                         support-function modes; NaN if the
+    final_gap       ()                   final worst-case gap between the outer
+                                         and inner approximation; NaN if the
                                          run raised before a result
     n_initial_rows  ()                   leading rows of A that form the
-                                         initial box, plus any structural rows
-                                         added up front (e.g. cumulative-capex
-                                         monotonicity); the rest are cutting
-                                         planes
+                                         initial box and monotonicity rows; the
+                                         rest are cutting planes
     point_origin    (n_points,) str      z_star | max:<axis> | min:<axis> | iterate
-    axis_meta_json  () str               per-axis members and capacity type
+    axis_meta_json  () str               per-axis metadata and the normalisation
     run_json        () str               how the run was configured and ended
 
-Normalisation is affine and per axis: physical = normalised * scale + offset.
-Five conventions exist, selected per run by `plugins.mga.normalisation`:
-"relative" (default) uses scale = upper bound, offset = 0 for design axes, so
-each reaches 1 at its near-optimal maximum; "minmax" uses scale = upper -
-lower bound, offset = lower bound, so each design axis spans exactly [0, 1]
-between its own near-optimal min and max; "units" uses scale = 1, offset =
-0, so design axes are reported in their own physical units; "share" (capex
-axes only -- node_capex, node_capex_cumulative, node_capex_tech,
-node_capex_cumulative_tech) uses scale = a fixed reference total evaluated
-once on the baseline design z*, rounded to one significant figure (e.g.
-12.3e6 -> 10e6, 18e12 -> 20e12), rather than recomputed per explored point,
-and offset = 0: every node_capex and node_capex_cumulative axis in a run
-shares one identical total (summed over every node and the full model
-horizon, regardless of a cumulative axis's own until_year), while each
-node_capex_tech or node_capex_cumulative_tech axis instead divides by its
-own technology group's total (also summed over every node and the full
-horizon, regardless of the latter's own until_year). Both the rounded total
-actually used and the raw, unrounded value it was rounded from are recorded
-per axis in axis_meta_json (as share_reference_total /
-share_reference_total_raw). "per_axes" (node_capex_cumulative,
-node_capacity_ratio, node_output_ratio and node_carbon_emissions_cumulative
-axes only) uses
-scale = a per-axis-kind reference rather than one shared run-wide total:
-node_capex_cumulative divides by a fixed configurable constant
-(`plugins.mga.per_axes_capex_reference`, default 15e12); node_capacity_ratio
-is already a fraction (its denominator technology group's capacity is frozen
-at the baseline design z*, per axis -- see axes.py's Axis docstring) and so
-uses scale = 1, as does node_output_ratio (same, over delivered output);
-node_carbon_emissions_cumulative divides by the model's own
-`carbon_emissions_budget` parameter. offset = 0 for all three. The reference
-actually used is recorded per axis in axis_meta_json as per_axes_reference.
-All conventions normalise the cost axis identically: scale = epsilon *
-c_star, offset = c_star, so 0 is the cost optimum and 1 the near-optimality
-budget.
-Which convention produced a given file is recorded in run_json. scale/offset
-are stored explicitly (rather than re-derived from bounds_phys) because they
-do not follow one rule.
+scale and offset are stored explicitly because they follow the run's
+normalisation convention (recorded in run_json; see the docs, section
+"Normalisation").
 """
 
 import json
@@ -104,7 +45,9 @@ from pathlib import Path
 
 import numpy as np
 
-# Axis kinds, stored per axis in `kinds` and in axis_meta_json.
+# Axis kinds, stored per axis in `kinds` and in axis_meta_json. NODE_CAPEX,
+# NODE_CAPEX_TECH and NODE_CAPEX_CUMULATIVE_TECH are no longer produced; they
+# are kept so polytope files of earlier runs stay readable.
 TECH_CAPACITY = "tech_capacity"
 CARRIER_IMPORT = "carrier_import"
 NODE_CAPEX = "node_capex"
