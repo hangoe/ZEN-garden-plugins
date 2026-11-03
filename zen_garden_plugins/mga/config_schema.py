@@ -138,7 +138,12 @@ class BboConfig(SupportFunctionConfig):
 
 
 class BatchConfig(SupportFunctionConfig):
-    """plugins.mga.batch (mode "batch"); n_workers None means one per CPU."""
+    """plugins.mga.batch (mode "batch"); n_workers None means one per CPU.
+
+    n_jobs_sampling: processes for pyoNearOpt's gap sampling (convergence
+    check and candidate directions), which runs in the main process between
+    worker rounds while the workers are idle; 1 keeps it serial.
+    """
 
     use_bounding_box: bool = True
     batch_size: int = 4
@@ -148,6 +153,14 @@ class BatchConfig(SupportFunctionConfig):
     n_restarts: int = 1
     bbo_enabled: bool = True
     n_workers: int | None = None
+    n_jobs_sampling: int = 1
+
+    @field_validator("n_jobs_sampling")
+    @classmethod
+    def _n_jobs_sampling_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"n_jobs_sampling must be >= 1, got {value!r}")
+        return value
 
 
 class WeightsIteration(ConfigBase):

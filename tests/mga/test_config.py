@@ -134,6 +134,7 @@ class TestDefaults:
         assert cfg["batch"]["convergence_mode"] == "ci"
         assert cfg["batch"]["bbo_enabled"] is True
         assert cfg["batch"]["n_workers"] is None
+        assert cfg["batch"]["n_jobs_sampling"] == 1
 
     def test_integers_become_floats_for_float_fields(self):
         cfg = validate_config({"epsilon": 1, "sampling": {"tolerance_explore": 1}})
@@ -142,6 +143,16 @@ class TestDefaults:
 
 
 class TestRejectedConfigs:
+    @pytest.mark.parametrize("value", [0, -2])
+    def test_rejects_non_positive_n_jobs_sampling(self, value):
+        with pytest.raises(ValueError, match="n_jobs_sampling"):
+            validate_config(
+                {
+                    "mode": "batch",
+                    "batch": {"tolerance_prob": 0.9, "n_jobs_sampling": value},
+                }
+            )
+
     @pytest.mark.parametrize("mode", ["sampling", "bbo", "batch"])
     @pytest.mark.parametrize("normalisation", ["share", "per_axes"])
     @pytest.mark.parametrize(

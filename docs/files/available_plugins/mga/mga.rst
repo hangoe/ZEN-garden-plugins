@@ -176,6 +176,13 @@ and all defaults are filled in.
       largest-gap sampled direction even with ``strategy_mode: "bbo"``.
     * ``n_workers`` (int, default the CPU count): worker processes. If
       ``batch_size > n_workers``, workers pick up queued directions.
+    * ``n_jobs_sampling`` (int, default 1): processes for pyoNearOpt's gap
+      sampling (the ``n_samples`` convergence-check directions), which runs
+      in the main process between worker rounds while the workers wait.
+      With many axes and points this bookkeeping, not the model solves, can
+      dominate the run time; values > 1 spread it over the otherwise idle
+      cores (each process needs a few hundred MB). The BBO search for the
+      main direction stays serial.
 
 Axes
 ----

@@ -179,7 +179,8 @@ def run_batch_mode(mga, cfg):
     logger.info(
         f"MGA batch: tolerance_prob = {cfg.tolerance_prob:.3g}, "
         f"max_iterations = {cfg.max_iterations}, batch_size = {cfg.batch_size}, "
-        f"n_workers = {n_workers}, strategy_mode = {cfg.strategy_mode!r}, "
+        f"n_workers = {n_workers}, n_jobs_sampling = {cfg.n_jobs_sampling}, "
+        f"strategy_mode = {cfg.strategy_mode!r}, "
         f"initial bounds = {'VMM' if supplied is None else 'supplied'}"
     )
     out = summary_dir(mga, "batch")
@@ -198,8 +199,9 @@ def run_batch_mode(mga, cfg):
         convergence_mode=cfg.convergence_mode,
         use_bounding_box=cfg.use_bounding_box,
         seed_rng=cfg.seed_rng,
-        # Pinned: no nested candidate-sampling pool inside the worker pool.
-        n_jobs_fraction=1,
+        # Gap sampling runs in this (parent) process between worker rounds,
+        # in its own short-lived spawn pool; it never nests inside a worker.
+        n_jobs_fraction=cfg.n_jobs_sampling,
         bbo_enabled=cfg.bbo_enabled,
         max_function_evaluations=cfg.max_function_evaluations,
         n_restarts=cfg.n_restarts,
@@ -245,6 +247,7 @@ def run_batch_mode(mga, cfg):
             strategy_mode=cfg.strategy_mode,
             convergence_mode=cfg.convergence_mode,
             n_workers=n_workers,
+            n_jobs_sampling=cfg.n_jobs_sampling,
             track_implied_threshold=cfg.track_implied_threshold,
             versions=package_versions(),
         )
