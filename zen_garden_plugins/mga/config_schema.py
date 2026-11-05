@@ -57,6 +57,14 @@ class NodeOutputRatio(ConfigBase):
     ratio_groups: list[dict[str, RatioGroup]] | None = None
 
 
+class NodeLimitUtilisation(ConfigBase):
+    """axes.node_limit_utilisation: used share of the capacity limit."""
+
+    nodes: list[AxisEntry] | None = None
+    years: list[int] | None = None
+    technology_groups: list[AxisEntry] | None = None
+
+
 class NodeCarbonEmissionsCumulative(ConfigBase):
     """axes.node_carbon_emissions_cumulative: emissions up to each until_year."""
 
@@ -73,6 +81,7 @@ class AxesConfig(ConfigBase):
     node_capex_cumulative: NodeCapexCumulative | None = None
     node_capacity_ratio: NodeCapacityRatio | None = None
     node_output_ratio: NodeOutputRatio | None = None
+    node_limit_utilisation: NodeLimitUtilisation | None = None
     node_carbon_emissions_cumulative: NodeCarbonEmissionsCumulative | None = None
 
 
@@ -214,6 +223,7 @@ class Config(ConfigBase):
         if self.normalisation == "share" and (
             axes.node_capacity_ratio
             or axes.node_output_ratio
+            or axes.node_limit_utilisation
             or axes.node_carbon_emissions_cumulative
         ):
             raise ValueError(

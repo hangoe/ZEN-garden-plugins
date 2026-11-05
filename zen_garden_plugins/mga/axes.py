@@ -18,6 +18,7 @@ from .polytope_io import (
     NODE_CAPACITY_RATIO,
     NODE_CAPEX_CUMULATIVE,
     NODE_CARBON_EMISSIONS_CUMULATIVE,
+    NODE_LIMIT_UTILISATION,
     NODE_OUTPUT_RATIO,
     TECH_CAPACITY,
     TOTAL_COST,
@@ -32,11 +33,14 @@ PERIOD_KINDS = frozenset(
         NODE_CAPEX_CUMULATIVE,
         NODE_CAPACITY_RATIO,
         NODE_OUTPUT_RATIO,
+        NODE_LIMIT_UTILISATION,
         NODE_CARBON_EMISSIONS_CUMULATIVE,
     }
 )
-# Kinds divided by a denominator frozen at the baseline design.
-RATIO_KINDS = frozenset({NODE_CAPACITY_RATIO, NODE_OUTPUT_RATIO})
+# Dimensionless kinds, divided by a constant denominator.
+RATIO_KINDS = frozenset(
+    {NODE_CAPACITY_RATIO, NODE_OUTPUT_RATIO, NODE_LIMIT_UTILISATION}
+)
 # Kinds whose value can be negative (negative-emission technologies); they
 # are neither clipped at 0 nor constrained to be monotone (docs: "Monotonicity").
 MAY_BE_NEGATIVE_KINDS = frozenset({NODE_CARBON_EMISSIONS_CUMULATIVE})
@@ -54,7 +58,7 @@ class Axis:
             axes, None otherwise.
         period: (None, until_year) for cumulative kinds, (year, year) for
             ratio kinds, None otherwise.
-        technologies: Numerator technology group of ratio axes.
+        technologies: Numerator group of ratio axes, group of limit axes.
         denominator_technologies: Denominator technology group of ratio axes.
     """
 
@@ -82,8 +86,8 @@ def build_axes(
 
     The order is the single source of truth for every column downstream:
     technology, carrier-import, cumulative-capex, capacity-ratio,
-    output-ratio and cumulative-emissions axes (each in config order), then
-    the cost axis.
+    output-ratio, limit-utilisation and cumulative-emissions axes (each in
+    config order), then the cost axis.
 
     Args:
         axes_cfg: The validated ``plugins.mga.axes`` block.
@@ -133,6 +137,9 @@ def build_axes(
         all_names,
         "axes.node_output_ratio",
     )
+    limit_axes = _parse_limit_block(
+        axes_cfg.node_limit_utilisation, tech_set, node_set, all_names
+    )
     emissions_axes, _ = _parse_cumulative_block(
         axes_cfg.node_carbon_emissions_cumulative,
         node_set,
@@ -147,6 +154,7 @@ def build_axes(
             capex_axes,
             capacity_ratio_axes,
             output_ratio_axes,
+            limit_axes,
             emissions_axes,
         )
         for name, *_ in group
@@ -193,6 +201,12 @@ def build_axes(
             denominator_technologies=tuple(denominator),
         )
         for name, nodes, numerator, denominator, year in output_ratio_axes
+    ]
+    axes += [
+        Axis(
+            name, NODE_LIMIT_UTILISATION, tuple(nodes), None, (year, year), tuple(techs)
+        )
+        for name, nodes, techs, year in limit_axes
     ]
     axes += [
         Axis(
@@ -289,6 +303,29 @@ def _parse_ratio_block(block, tech_set, node_set, reserved_names, label):
         for node_name, node_members in node_groups
         for ratio_name, numerator, denominator in groups
         for year in parsed_years
+    ]
+
+
+def _parse_limit_block(block, tech_set, node_set, reserved_names):
+    """(f"{nodes}_{group}_{year}", [nodes], [techs], year) tuples, in config order."""
+    label = "axes.node_limit_utilisation"
+    if block is None:
+        return []
+    nodes, years, groups = block.nodes, block.years, block.technology_groups
+    if not (nodes or years or groups):
+        return []
+    if not (nodes and years and groups):
+        raise ValueError(
+            f"MGA {label}: give 'nodes', 'years' and 'technology_groups' together."
+        )
+    node_groups = _parse_axis_list(nodes, node_set, reserved_names, f"{label}.nodes")
+    years = _parse_year_list(years, f"{label}.years")
+    groups = _parse_axis_list(groups, tech_set, reserved_names, f"{label}.groups")
+    return [
+        (f"{node}_{group}_{year}", node_members, techs, year)
+        for node, node_members in node_groups
+        for group, techs in groups
+        for year in years
     ]
 
 

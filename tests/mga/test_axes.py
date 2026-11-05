@@ -11,6 +11,7 @@ from zen_garden_plugins.mga.polytope_io import (
     NODE_CAPACITY_RATIO,
     NODE_CAPEX_CUMULATIVE,
     NODE_CARBON_EMISSIONS_CUMULATIVE,
+    NODE_LIMIT_UTILISATION,
     NODE_OUTPUT_RATIO,
     TECH_CAPACITY,
     TOTAL_COST,
@@ -137,6 +138,75 @@ class TestCumulativeAxes:
                 node_carbon_emissions_cumulative={
                     "nodes": ["DE"],
                     "until_years": [2030],
+                },
+            )
+
+
+class TestLimitUtilisationAxes:
+    def test_nodes_major_groups_middle_years_minor(self):
+        axes, chains = axes_of(
+            node_limit_utilisation={
+                "nodes": ["DE", BENELUX],
+                "years": [2030, 2050],
+                "technology_groups": [{"store": ["pv", "nuclear"]}],
+            }
+        )
+        assert _tuples(axes) == [
+            ("DE_store_2030", NODE_LIMIT_UTILISATION, ("DE",), (2030, 2030)),
+            ("DE_store_2050", NODE_LIMIT_UTILISATION, ("DE",), (2050, 2050)),
+            (
+                "benelux_store_2030",
+                NODE_LIMIT_UTILISATION,
+                ("BE", "NL", "LU"),
+                (2030, 2030),
+            ),
+            (
+                "benelux_store_2050",
+                NODE_LIMIT_UTILISATION,
+                ("BE", "NL", "LU"),
+                (2050, 2050),
+            ),
+        ]
+        assert axes[0].technologies == ("pv", "nuclear")
+        assert axes[0].denominator_technologies is None
+        assert chains == []
+
+    def test_unit_is_dimensionless(self):
+        axis = Axis("a", NODE_LIMIT_UTILISATION, ("DE",), None, (2030, 2030))
+        assert axis_physical_unit(axis, {}, pint.UnitRegistry()) == "dimensionless"
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            {"nodes": ["DE"]},
+            {"years": [2030]},
+            {"technology_groups": ["pv"]},
+            {"nodes": ["DE"], "years": [2030]},
+            {"nodes": ["DE"], "technology_groups": ["pv"]},
+            {"years": [2030], "technology_groups": ["pv"]},
+            {"nodes": ["typo"], "years": [2030], "technology_groups": ["pv"]},
+            {"nodes": ["DE"], "years": [2030], "technology_groups": ["typo"]},
+            {"nodes": ["DE"], "years": [2030, 2030], "technology_groups": ["pv"]},
+            # group name shadows a technology
+            {"nodes": ["DE"], "years": [2030], "technology_groups": [{"pv": ["pv"]}]},
+        ],
+    )
+    def test_invalid_configs_are_rejected(self, block):
+        with pytest.raises(ValueError):
+            axes_of(node_limit_utilisation=block)
+
+    def test_names_cannot_collide_with_ratio_axes(self):
+        with pytest.raises(ValueError, match="more than one"):
+            axes_of(
+                node_output_ratio={
+                    "nodes": ["DE"],
+                    "years": [2030],
+                    "ratio_groups": [PV_SHARE],
+                },
+                node_limit_utilisation={
+                    "nodes": ["DE"],
+                    "years": [2030],
+                    "technology_groups": [{"g": ["pv"]}],
                 },
             )
 

@@ -10,6 +10,8 @@ from mga_helpers import FakeSolved, evaluator_stub
 
 from zen_garden_plugins.mga.axes import Axis
 from zen_garden_plugins.mga.axis_evaluation import (
+    _limit_reference_carriers,
+    annual_capacity_limit,
     selected_capacity_type,
     year_indices_in_period,
     year_interval_expansion_factors,
@@ -18,6 +20,7 @@ from zen_garden_plugins.mga.polytope_io import (
     NODE_CAPACITY_RATIO,
     NODE_CAPEX_CUMULATIVE,
     NODE_CARBON_EMISSIONS_CUMULATIVE,
+    NODE_LIMIT_UTILISATION,
     NODE_OUTPUT_RATIO,
 )
 
@@ -227,6 +230,135 @@ class TestRatioAxes:
         evaluator = self._evaluator(1)
         with pytest.raises(RuntimeError, match="non-positive baseline denominator"):
             getattr(evaluator, method)(_ratio_axis(kind, denominator=("wind",)))
+
+
+def _limit_axis(nodes=("NO", "HR"), techs=("store",), year=1):
+    return Axis(
+        "all_g",
+        NODE_LIMIT_UTILISATION,
+        tuple(nodes),
+        None,
+        period=(year, year),
+        technologies=tuple(techs),
+    )
+
+
+def _capacity_parameter(store_at_no, store_at_hr):
+    """A capacity parameter over (tech, type, location, year) for "store"."""
+    return xr.DataArray(
+        [[[[store_at_no, store_at_no], [store_at_hr, store_at_hr]]]],
+        dims=["set_technologies", "set_capacity_types", "set_location", "set_years"],
+        coords={
+            "set_technologies": ["store"],
+            "set_capacity_types": ["power"],
+            "set_location": ["NO", "HR"],
+            "set_years": [0, 1],
+        },
+    )
+
+
+class TestLimitUtilisation:
+    def _annual_limit(self, limit_no=10.0):
+        # HR: existing capacity 2 above its limit of 0.
+        return annual_capacity_limit(
+            _capacity_parameter(limit_no, 0.0),
+            _capacity_parameter(1.0, 2.0),
+            xr.DataArray(
+                [100.0, 100.0], dims=["set_years"], coords={"set_years": [0, 1]}
+            ),
+        )
+
+    def _input(self):
+        """Annual flow_conversion_input stand-in; other carrier/year are decoys."""
+        data = np.zeros((1, 2, 2, 2))
+        data[0, 0, 0, :] = [300.0, 500.0]  # carbon @ NO
+        data[0, 0, 1, :] = [50.0, 100.0]  # carbon @ HR
+        data[0, 1, 0, :] = [9999.0, 9999.0]  # other @ NO
+        return xr.DataArray(
+            data,
+            dims=[
+                "set_conversion_technologies",
+                "set_input_carriers",
+                "set_nodes",
+                "set_years",
+            ],
+            coords={
+                "set_conversion_technologies": ["store"],
+                "set_input_carriers": ["carbon", "other"],
+                "set_nodes": ["NO", "HR"],
+                "set_years": [0, 1],
+            },
+        )
+
+    def _evaluator(self, limit_no=10.0):
+        evaluator = evaluator_stub(
+            flow_conversion_input_yearly=FakeSolved(self._input()),
+            annual_capacity_limit=self._annual_limit(limit_no),
+            axis_year_indices={"all_g": [1]},
+            limit_reference_carrier={"all_g": "carbon"},
+        )
+        evaluator.ratio_denominator = {
+            "all_g": evaluator._limit_denominator(_limit_axis())
+        }
+        return evaluator
+
+    def test_effective_limit_is_the_larger_of_limit_and_existing(self):
+        limit = self._annual_limit().sel(set_technologies="store")
+        assert float(limit.sel(set_location="NO", set_years=1)) == pytest.approx(1000.0)
+        assert float(limit.sel(set_location="HR", set_years=1)) == pytest.approx(200.0)
+
+    def test_divides_own_year_reference_input_by_the_annual_limit(self):
+        evaluator = self._evaluator()
+        assert evaluator.ratio_denominator["all_g"] == pytest.approx(1200.0)
+        assert evaluator.value(_limit_axis()) == pytest.approx(600.0 / 1200.0)
+
+    @pytest.mark.parametrize(
+        "limit_no, existing_hr",
+        [(0.0, 0.0), (np.inf, 2.0)],
+        ids=["no capacity limit", "infinite limit"],
+    )
+    def test_unusable_limit_is_rejected(self, limit_no, existing_hr):
+        evaluator = evaluator_stub(
+            annual_capacity_limit=annual_capacity_limit(
+                _capacity_parameter(limit_no, 0.0),
+                _capacity_parameter(0.0, existing_hr),
+                xr.DataArray(
+                    [100.0, 100.0], dims=["set_years"], coords={"set_years": [0, 1]}
+                ),
+            ),
+            axis_year_indices={"all_g": [1]},
+        )
+        with pytest.raises(RuntimeError, match="finite, positive capacity limit"):
+            evaluator._limit_denominator(_limit_axis())
+
+    @pytest.mark.parametrize(
+        "techs", [("wind",), ("producer",), ("store", "other_store")]
+    )
+    def test_reference_carrier_validation(self, techs):
+        sets = {
+            "set_conversion_technologies": ["store", "other_store", "producer"],
+            "set_reference_carriers": {
+                "store": ["carbon"],
+                "other_store": ["hydrogen"],
+                "producer": ["electricity"],
+            },
+            "set_input_carriers": {
+                "store": ["carbon"],
+                "other_store": ["hydrogen"],
+                "producer": ["gas"],
+            },
+        }
+        with pytest.raises(ValueError, match="sharing one input reference carrier"):
+            _limit_reference_carriers([_limit_axis(techs=techs)], sets)
+
+    def test_reference_carrier_of_a_valid_group(self):
+        sets = {
+            "set_conversion_technologies": ["store"],
+            "set_reference_carriers": {"store": ["carbon"]},
+            "set_input_carriers": {"store": ["carbon"]},
+        }
+        carriers = _limit_reference_carriers([_limit_axis()], sets)
+        assert carriers == {"all_g": "carbon"}
 
 
 class TestOutputRatioValidation:

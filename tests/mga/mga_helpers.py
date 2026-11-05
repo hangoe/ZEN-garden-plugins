@@ -66,6 +66,7 @@ def evaluator_stub(**attrs):
         carbon_emissions_yearly=None,
         carbon_emissions_carrier_yearly=None,
         flow_conversion_output_yearly=None,
+        flow_conversion_input_yearly=None,
         axis_year_indices={},
         capex_discount_factor=None,
         emissions_interval_factor=None,

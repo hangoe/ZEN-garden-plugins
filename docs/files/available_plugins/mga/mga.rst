@@ -242,6 +242,12 @@ axes, each in config order, then the cost axis.
     (e.g. passenger and freight transport go into separate groups; checked
     when ZEN-garden's unit tracking is on).
 
+``node_limit_utilisation`` (``nodes``, ``years``, ``technology_groups``)
+    Annual ``flow_conversion_input`` of the reference carrier divided by
+    ``max(capacity_limit, existing_capacities) * hours``. Members must be
+    conversion technologies sharing one input reference carrier. For
+    ``carbon_storage`` this is the use of the injection rate, not of a reservoir.
+
 ``node_carbon_emissions_cumulative`` (``nodes``, ``until_years``)
     Annualised ``carbon_emissions_technology`` plus
     ``carbon_emissions_carrier`` of the member nodes up to ``until_year``,

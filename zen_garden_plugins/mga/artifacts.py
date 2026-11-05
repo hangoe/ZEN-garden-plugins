@@ -13,6 +13,7 @@ from . import normalisation as norm
 from .axes import axis_physical_unit
 from .polytope_io import (
     NODE_CAPACITY_RATIO,
+    NODE_LIMIT_UTILISATION,
     NODE_OUTPUT_RATIO,
     TOTAL_COST,
     Polytope,
@@ -77,6 +78,11 @@ def polytope_metadata(mga) -> dict:
                 "output_ratio_denominator_baseline": (
                     float(denominators[axis.name])
                     if axis.kind == NODE_OUTPUT_RATIO
+                    else None
+                ),
+                "limit_utilisation_denominator": (
+                    float(denominators[axis.name])
+                    if axis.kind == NODE_LIMIT_UTILISATION
                     else None
                 ),
                 "unit": axis_physical_unit(axis, units, ureg),

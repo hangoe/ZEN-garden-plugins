@@ -176,6 +176,13 @@ class TestRejectedConfigs:
         [
             {"node_capacity_ratio": RATIO},
             {"node_output_ratio": RATIO},
+            {
+                "node_limit_utilisation": {
+                    "nodes": ["DE"],
+                    "years": [2030],
+                    "technology_groups": ["pv"],
+                }
+            },
             {"node_carbon_emissions_cumulative": EMISSIONS},
         ],
     )

@@ -56,6 +56,7 @@ NODE_CAPEX_TECH = "node_capex_tech"
 NODE_CAPEX_CUMULATIVE_TECH = "node_capex_cumulative_tech"
 NODE_CAPACITY_RATIO = "node_capacity_ratio"
 NODE_OUTPUT_RATIO = "node_output_ratio"
+NODE_LIMIT_UTILISATION = "node_limit_utilisation"
 NODE_CARBON_EMISSIONS_CUMULATIVE = "node_carbon_emissions_cumulative"
 TOTAL_COST = "total_cost"
 

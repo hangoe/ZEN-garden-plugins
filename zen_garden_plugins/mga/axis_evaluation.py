@@ -20,6 +20,7 @@ from .polytope_io import (
     NODE_CAPACITY_RATIO,
     NODE_CAPEX_CUMULATIVE,
     NODE_CARBON_EMISSIONS_CUMULATIVE,
+    NODE_LIMIT_UTILISATION,
     NODE_OUTPUT_RATIO,
     TECH_CAPACITY,
     TOTAL_COST,
@@ -150,6 +151,37 @@ def year_interval_expansion_factors(
     return xr.DataArray(factors, dims=["set_years"], coords={"set_years": year_indices})
 
 
+def annual_capacity_limit(capacity_limit, existing_capacities, hours_per_year):
+    """Annual flow allowed by max(limit, existing): existing capacity stays usable."""
+    limit = capacity_limit.sel(set_capacity_types="power", drop=True)
+    existing = existing_capacities.sel(set_capacity_types="power", drop=True)
+    return limit.where(limit >= existing, existing) * hours_per_year
+
+
+def _limit_reference_carriers(axes, sets) -> dict[str, str]:
+    """The input reference carrier shared by each limit axis's technologies."""
+    carriers = {}
+    for axis in axes:
+        references = {
+            tech: sets["set_reference_carriers"][tech][0]
+            for tech in axis.technologies
+            if tech in sets["set_conversion_technologies"]
+        }
+        if (
+            len(references) < len(axis.technologies)
+            or len(set(references.values())) > 1
+            or any(
+                c not in sets["set_input_carriers"][t] for t, c in references.items()
+            )
+        ):
+            raise ValueError(
+                f"MGA axis {axis.name!r}: {axis.technologies} must be conversion "
+                f"technologies sharing one input reference carrier."
+            )
+        carriers[axis.name] = next(iter(references.values()))
+    return carriers
+
+
 class AxisEvaluator:
     """Expressions and values of the MGA axes on one solved model.
 
@@ -225,6 +257,29 @@ class AxisEvaluator:
                 )
                 * year_op_duration
             ).sum("set_time_steps_operation")
+        self.flow_conversion_input_yearly = None
+        self.annual_capacity_limit = None
+        self.limit_reference_carrier: dict[str, str] = {}
+        if NODE_LIMIT_UTILISATION in kinds:
+            limit_axes = [a for a in axes if a.kind == NODE_LIMIT_UTILISATION]
+            self.limit_reference_carrier = _limit_reference_carriers(
+                limit_axes, om.sets
+            )
+            year_op_duration = GenericConstraint.get_year_time_step_duration_array(
+                optimization_step
+            )
+            limit_techs = sorted({t for a in limit_axes for t in a.technologies})
+            self.flow_conversion_input_yearly = (
+                variables["flow_conversion_input"].sel(
+                    set_conversion_technologies=limit_techs
+                )
+                * year_op_duration
+            ).sum("set_time_steps_operation")
+            self.annual_capacity_limit = annual_capacity_limit(
+                parameters.capacity_limit.sel(set_technologies=limit_techs),
+                parameters.existing_capacities.sel(set_technologies=limit_techs),
+                year_op_duration.sum("set_time_steps_operation"),
+            )
 
         self.axis_year_indices: dict[str, list] = {}
         year_indices = interval_between_years = last_year_index = None
@@ -279,6 +334,13 @@ class AxisEvaluator:
                 if axis.kind == NODE_OUTPUT_RATIO
             }
         )
+        self.ratio_denominator.update(
+            {
+                axis.name: self._limit_denominator(axis)
+                for axis in axes
+                if axis.kind == NODE_LIMIT_UTILISATION
+            }
+        )
 
     # ------------------------------------------------------------------
     # public interface
@@ -315,6 +377,7 @@ class AxisEvaluator:
             "emissions": self.carbon_emissions_yearly,
             "emissions_carrier": self.carbon_emissions_carrier_yearly,
             "output": self.flow_conversion_output_yearly,
+            "input": self.flow_conversion_input_yearly,
         }
         if not solution:
             return handles
@@ -369,6 +432,15 @@ class AxisEvaluator:
             .sum(_OUTPUT_DIMS)
         )
         return numerator / self.ratio_denominator[axis.name]
+
+    def _limit_utilisation(self, axis, src, year_ids):
+        numerator = src["input"].sel(
+            set_conversion_technologies=list(axis.technologies),
+            set_input_carriers=[self.limit_reference_carrier[axis.name]],
+            set_nodes=list(axis.members),
+            set_years=year_ids,
+        )
+        return numerator.sum() / self.ratio_denominator[axis.name]
 
     def _emissions_cumulative(self, axis, src, year_ids):
         """Technology plus carrier emissions of the member nodes.
@@ -430,6 +502,21 @@ class AxisEvaluator:
             )
         return value
 
+    def _limit_denominator(self, axis: Axis) -> float:
+        value = float(
+            self.annual_capacity_limit.sel(
+                set_technologies=list(axis.technologies),
+                set_location=list(axis.members),
+                set_years=self.axis_year_indices[axis.name],
+            ).sum()
+        )
+        if not np.isfinite(value) or value <= 0:
+            raise RuntimeError(
+                f"MGA: axis {axis.name!r} needs a finite, positive capacity limit, "
+                f"got {value:.6g}."
+            )
+        return value
+
     def _validate_output_ratio_axes(self, axes, variable_units):
         """Members must be conversion technologies sharing one output unit.
 
@@ -483,5 +570,6 @@ _TERMS = {
     NODE_CAPEX_CUMULATIVE: AxisEvaluator._capex_cumulative,
     NODE_CAPACITY_RATIO: AxisEvaluator._capacity_ratio,
     NODE_OUTPUT_RATIO: AxisEvaluator._output_ratio,
+    NODE_LIMIT_UTILISATION: AxisEvaluator._limit_utilisation,
     NODE_CARBON_EMISSIONS_CUMULATIVE: AxisEvaluator._emissions_cumulative,
 }
