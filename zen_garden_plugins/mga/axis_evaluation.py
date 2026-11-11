@@ -14,7 +14,7 @@ import numpy as np
 import xarray as xr
 from zen_garden.model.component_types.constraint import GenericConstraint
 
-from .axes import COST_VARIABLE, PERIOD_KINDS, Axis
+from .axes import COST_VARIABLE, Axis
 from .polytope_io import (
     CARRIER_IMPORT,
     NODE_CAPACITY_RATIO,
@@ -214,6 +214,13 @@ class AxisEvaluator:
         if CARRIER_IMPORT in kinds:
             self.flow_import = variables["flow_import"]
             self.ts_duration = parameters.time_steps_operation_duration
+            # Per-year durations, for import axes restricted to a year.
+            if any(a.kind == CARRIER_IMPORT and a.period for a in axes):
+                self.ts_duration_yearly = (
+                    GenericConstraint.get_year_time_step_duration_array(
+                        optimization_step
+                    )
+                )
         # Stock capacity, distinct from the capacity_addition of tech axes.
         self.capacity = variables["capacity"] if NODE_CAPACITY_RATIO in kinds else None
         # Indexed by set_location: selecting node names drops transport
@@ -283,7 +290,7 @@ class AxisEvaluator:
 
         self.axis_year_indices: dict[str, list] = {}
         year_indices = interval_between_years = last_year_index = None
-        if kinds & PERIOD_KINDS:
+        if any(axis.period is not None for axis in axes):
             year_indices = list(model_schema.set_years)
             real_years = list(model_schema.set_time_steps_years)
             last_year_index = int(model_schema.set_years_entire_horizon[-1])
@@ -291,7 +298,7 @@ class AxisEvaluator:
                 optimization_step.config.system.interval_between_years
             )
             for axis in axes:
-                if axis.kind not in PERIOD_KINDS:
+                if axis.period is None:
                     continue
                 ids = year_indices_in_period(axis.period, year_indices, real_years)
                 if not ids:
@@ -397,6 +404,12 @@ class AxisEvaluator:
         )
 
     def _carrier_import(self, axis, src, year_ids):
+        if year_ids is not None:
+            # Annual import in the axis year(s) only.
+            return (
+                self.ts_duration_yearly.sel(set_years=year_ids)
+                * src["flow_import"].sel(set_carriers=list(axis.members))
+            ).sum([*_CARRIER_DIMS, "set_years"])
         return (
             self.ts_duration * src["flow_import"].sel(set_carriers=list(axis.members))
         ).sum(_CARRIER_DIMS)

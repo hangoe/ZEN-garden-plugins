@@ -204,7 +204,9 @@ axes, each in config order, then the cost axis.
 
 ``carrier_imports``
     Duration-weighted annual import ``sum tau_t * flow_import`` of the
-    member carriers.
+    member carriers. With ``carrier_imports_years: [y, ...]`` it becomes one
+    axis per (carrier group, year), named ``<group>_<year>``, holding the
+    import of that model year only; otherwise it sums over all model years.
 
 ``node_capex_cumulative`` (``nodes``, ``until_years``)
     Annualised ``cost_capex_yearly`` of the member nodes over every model

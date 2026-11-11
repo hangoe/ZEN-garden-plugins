@@ -117,6 +117,22 @@ def build_axes(
     carrier_groups = _parse_axis_list(
         axes_cfg.carrier_imports, carrier_set, all_names, "axes.carrier_imports"
     )
+    # Optional snapshot years: one axis per (carrier group, year).
+    if axes_cfg.carrier_imports_years:
+        if not carrier_groups:
+            raise ValueError(
+                "MGA axes.carrier_imports_years: given without axes.carrier_imports."
+            )
+        years = _parse_year_list(
+            axes_cfg.carrier_imports_years, "axes.carrier_imports_years"
+        )
+        carrier_groups = [
+            (f"{name}_{year}", members, (year, year))
+            for name, members in carrier_groups
+            for year in years
+        ]
+    else:
+        carrier_groups = [(name, members, None) for name, members in carrier_groups]
     capex_axes, capex_chains = _parse_cumulative_block(
         axes_cfg.node_capex_cumulative,
         node_set,
@@ -171,8 +187,8 @@ def build_axes(
         for name, members in tech_groups
     ]
     axes += [
-        Axis(name, CARRIER_IMPORT, tuple(members), None)
-        for name, members in carrier_groups
+        Axis(name, CARRIER_IMPORT, tuple(members), None, period)
+        for name, members, period in carrier_groups
     ]
     axes += [
         Axis(name, NODE_CAPEX_CUMULATIVE, tuple(members), None, (None, until_year))

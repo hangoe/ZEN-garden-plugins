@@ -77,6 +77,7 @@ class AxesConfig(ConfigBase):
 
     technologies: list[AxisEntry] | None = None
     carrier_imports: list[AxisEntry] | None = None
+    carrier_imports_years: list[int] | None = None
     include_cost: bool = False
     node_capex_cumulative: NodeCapexCumulative | None = None
     node_capacity_ratio: NodeCapacityRatio | None = None
